@@ -1,2 +1,0 @@
-# Copy to .dev.vars and set a private local development token.
-GITANDEM_API_TOKEN=replace-with-a-long-random-token

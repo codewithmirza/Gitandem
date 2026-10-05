@@ -1,97 +1,106 @@
 # Gitandem
 
-**Shared coordination for independent agents.** Gitandem gives coding agents one versioned place for project intent, decisions, assignments, and proposed changes. It is a coordination layer that can sit beside GitHub; repository history remains the place for code history.
+Gitandem is an early project-hosting and coordination system for work shared by people and AI agents. Its central idea is simple: agents should agree on the intended work against a shared project plan before they receive permission to execute it.
 
-The first runnable slice includes a React dashboard, a Cloudflare Worker REST API, a stateless MCP endpoint, and a SQLite-backed Durable Object per project. The dashboard and MCP tools call the same project coordinator, so agents and people see the same contracts and proposal state.
+Today this repository contains an early project host. It creates a canonical Git repository on Cloudflare Artifacts or imports a public HTTPS Git remote, stores a shared project plan, accepts structured work intents, detects explicit scope and interface collisions, and runs owner-authorized work in a separate task workspace.
 
-## What works today
+## Why Gitandem
 
-- Versioned shared decisions (contracts) with an actor and change history.
-- Work assignments that snapshot the project revision and current decision versions.
-- Agent proposals with explicit validation against both the project revision and each shared decision version.
-- Stale proposal blocking, explicit rebase, validation, and acceptance that advances the authoritative project revision.
-- A shared recent activity feed, usable through REST, MCP, and the dashboard.
-- A two-agent demo that shows one proposal built against an older contract.
-- Bearer-token protection for both API and MCP requests.
+Version history answers what changed. A merge tool can show that two edits touch the same lines. Neither can decide whether two agents understood the product goal in the same way or whether their proposed designs fit the same contract.
 
-The GitHub card in the dashboard is illustrative. OAuth installation, branch/worktree creation, reading and writing repository contents, patch application, and provider webhooks are not connected yet. Acceptance currently advances Gitandem’s coordination revision; it does not merge code into GitHub. Those are adapter layers to add after the coordination contract has been proven.
+Gitandem makes the plan part of the shared project state. Before implementation, an agent submits:
+
+- The outcome it plans to deliver
+- The parts of the project it expects to change
+- Assumptions, shared interfaces, and dependencies
+- Evidence that will show the work is complete
+
+Gitandem compares declared scopes and interfaces. A clear intent can be reviewed and authorized. A detected collision is held for a human decision. Authorization is bound to the current plan revision; changing the plan revokes active grants and requires realignment.
+
+This is coordination policy, not an AI judge. The current prototype detects explicit structured collisions. It does not infer which design is correct or silently expose one agent's private reasoning to another. A project owner resolves choices using the project plan and the context each contributor is allowed to see.
+
+## Current scope
+
+Implemented:
+
+- A versioned coordination contract in `packages/core`, shared by the web app, REST, and MCP adapters
+- A headless coordination service with a persistence port and explicit plan, work, conflict, and grant transitions
+- Create a project with a goal and initial constraints
+- Create a canonical Gitandem repository or import a public HTTPS Git remote
+- Issue a short-lived, repository-scoped Git token for clone and push setup
+- Maintain versioned shared plans and decisions
+- Submit work intents through the web UI, REST API, or MCP
+- Detect exact scope overlap and conflicting proposals for a named interface
+- Hold conflicting work for resolution and review conflict-free work before authorization
+- Bind grants to a plan revision and revoke them when that plan changes
+- Store project state in one SQLite-backed Durable Object per project
+- Fork an approved intent's exact base commit into its own Artifacts repository
+- Run authorized argv commands in a managed Linux container with the task fork mounted as its working repository
+- Keep per-task Git credentials inside Gitandem and revoke them after each command
+- Verify a submitted task commit is the task fork head and includes the approved base commit
+- Let the owner fast-forward the canonical branch to that submitted commit; revoke the work grant after acceptance
+
+Next work:
+
+- Private remote import and a guided browser folder upload; a local Git folder can push to a new project repository with the short-lived token
+- Live-check the complete submit and accept flow against Cloudflare Artifacts
+- Strengthen result review with clearer commit diffs and evidence against each acceptance condition
+- Strong user, project, and cryptographic agent identities in place of deployment-wide prototype secrets
+- Fine-grained container egress and resource limits
+- Multi-user identity, project roles, and scoped credentials
+- Automatic semantic interpretation or resolution of competing plans
+
+Gitandem is intended to become the project home itself. Existing repositories are migration paths; the imported Artifacts repository becomes the canonical copy for that Gitandem project.
 
 ## Run locally
 
-Requires Node.js 22+ and pnpm 10+.
+Requirements: Node.js 20 or newer and pnpm.
 
-```powershell
+```sh
 pnpm install
-Copy-Item .dev.vars.example .dev.vars
-# Edit .dev.vars and replace the placeholder with a long random token.
+Copy-Item apps/web/.dev.vars.example apps/web/.dev.vars
+# Edit apps/web/.dev.vars and set a long random local token.
 pnpm dev
 ```
 
-Open the local Vite URL. Paste the same token from `.dev.vars` into the connect screen. The token is kept in this browser’s local storage and sent only to the local Gitandem server. You can remove it using the profile button in the lower-left corner.
+Open the local URL shown by Vite and enter the token from `apps/web/.dev.vars`. The local token is a development guard, not production authentication. Do not commit that file.
 
-To produce the static and Worker build:
+Local mode keeps Worker execution on your machine and lets you create plan-only projects and exercise the coordination routes. Repository create/import and Git tokens are intentionally disabled locally. They call Cloudflare Artifacts, which requires an eligible Workers Paid account. This avoids making every `pnpm dev` startup depend on a paid remote preview or accidentally sending local work to a remote repository.
 
-```powershell
+Useful commands:
+
+```sh
 pnpm build
+pnpm test
+pnpm cf-typegen
 ```
 
-The build removes the local `.dev.vars` copy from the generated Worker directory so a development token cannot ship inside the build output.
+`apps/web/wrangler.jsonc` declares the SQLite-backed Durable Object and Artifacts namespace binding. The binding uses the name `gitandem` and contains no account ID, deployed namespace ID, or created remote resource. Cloudflare Artifacts access requires an eligible Workers plan and a configured account. The app does not provision account resources automatically.
 
-## MCP connection
+## API and agent access
 
-Connect an MCP client to `http://localhost:5173/mcp` (or the Vite URL shown by `pnpm dev`) using Streamable HTTP and an `Authorization: Bearer <GITANDEM_API_TOKEN>` header. The server exposes these tools:
+Owner REST routes use `Authorization: Bearer <GITANDEM_API_TOKEN>`. MCP uses a separate `GITANDEM_AGENT_TOKEN`. An agent can submit a result via MCP; only the owner REST interface can accept it into the canonical branch.
 
-| Tool | Purpose |
-| --- | --- |
-| `get_project_context` | Read revision, shared decisions, assignments, proposals, and activity. |
-| `update_decision` | Create or version a shared project contract. |
-| `create_assignment` | Create work against the current project and decision versions. |
-| `submit_proposal` | Submit a change proposal against the current shared context. |
-| `validate_proposal` | Check whether a proposal’s base is still current. |
-| `rebase_proposal` | Restamp a proposal after the agent has reconciled it with current context. |
-| `revise_proposal` | Record the agent-reviewed update required after a rebase. |
-| `accept_proposal` | Validate and accept a current proposal, advancing project revision. |
+REST routes are documented in [docs/api.md](docs/api.md). The MCP server exposes tools to create a project, read its context, propose work, run commands after owner authorization, and submit a finished commit. MCP is an interface an agent can use to work with Gitandem; it does not require a separate agent-to-agent protocol.
 
-Every tool requires a `projectId`. The bundled demo project is `atlas-commerce`; call `POST /api/demo` once to initialize it.
+Use separate `GITANDEM_API_TOKEN` and `GITANDEM_AGENT_TOKEN` values. The owner token guards REST; the agent token guards MCP, whose tools cannot update the plan, authorize work, or accept results. These are deployment-wide prototype secrets, not a user or membership system. The runner currently has Internet access and limits each command to 120 seconds. The owner acceptance path has not yet had a live end-to-end check.
 
 ## Architecture
 
-```text
-Person / Agent host
-        │
-        ├── Dashboard ── REST ─┐
-        └── MCP client ────────┤
-                               ▼
-                    Gitandem Worker API
-                               │
-                COORDINATOR namespace binding
-                               │
-              ProjectCoordinator(projectId)
-                   Durable Object + SQLite
-```
+See [docs/architecture.md](docs/architecture.md) for the current data flow and the boundaries between project coordination, Git history, and code execution.
 
-The Durable Object serializes writes for one project. A proposal records the project revision and decision versions it read. Validation compares those values to current state; acceptance repeats validation immediately before writing. When the context moved, acceptance is rejected. Rebase is an explicit operation, and the UI asks for a fresh validation after it.
+See the implementation order. The project interface is a client of the coordination protocol; it is not the core product.
 
-See [docs/architecture.md](docs/architecture.md) for the data model and [docs/api.md](docs/api.md) for REST routes.
+The existing web application lives in `apps/web`. Future protocol packages and SDKs will live in `packages/`, so all parts of Gitandem stay in one monorepo.
 
-## Cloudflare configuration
+The v1 coordination contract is documented in [docs/protocol.md](docs/protocol.md). JSON API responses include `X-Gitandem-Contract-Version`; project snapshots include the same version as `contractVersion`.
 
-`wrangler.jsonc` declares the Worker, a Durable Object namespace binding, and a SQLite-backed Durable Object class migration. These are **unprovisioned declarations**: no Cloudflare resources, account IDs, database IDs, KV IDs, or secrets have been created. The binding and migration become real only after a future deployment. This project has not been deployed.
+Cloudflare Workers serves the app and APIs. Each project maps to a SQLite-backed Durable Object, which is the single coordination authority for that project. Cloudflare documents Durable Objects as strongly consistent, serializable storage attached to globally named coordinators: [Durable Objects](https://developers.cloudflare.com/durable-objects/), [SQLite-backed storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/).
 
-For a future deployment, set `GITANDEM_API_TOKEN` as a Worker secret before exposing the service. Do not set a production token in `wrangler.jsonc` or commit `.dev.vars`.
+## Contributing
 
-## Design system
+This is an early open-source project. See [CONTRIBUTING.md](CONTRIBUTING.md) for the current development rules and planned boundaries. Please describe the user problem and intended behavior before making a large change.
 
-The dashboard uses `gitandem-design-system` (`^0.4.1`) as an npm dependency for its design tokens, buttons, badges, and cards. That package currently declares `UNLICENSED`; review its distribution rights before publishing Gitandem as open source or bundling it for external clients. The Gitandem app itself is standalone and does not import third-party runtime code.
+## License
 
-## Current boundaries
-
-- The database is the per-project Durable Object’s embedded SQLite storage; no D1 or external database binding is needed for this model.
-- The API uses one configured bearer token. Multi-user identity, scoped roles, OAuth, token rotation, and organization tenancy are not implemented.
-- Proposals store a text summary and artifact description, not a Git patch. Accepted changes do not alter repository files.
-- The included demo is seeded through the API, not stored as static frontend state.
-- There are no automated tests in this initial slice.
-
-## Challenge release note
-
-This GitHub repository was created as **private** per the project owner’s instruction. The Cloudflare Git challenge calls for open-source code. Before using this repository as the public submission, change its visibility and make sure every dependency can be redistributed; in particular, resolve the design-system package’s current `UNLICENSED` declaration.
+No license has been selected yet. Until a license file is added, standard copyright restrictions apply. Do not assume the code is available for reuse just because the repository is public.

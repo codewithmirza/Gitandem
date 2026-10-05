@@ -1,0 +1,3 @@
+# Copy to .dev.vars and set different private owner and agent tokens.
+GITANDEM_API_TOKEN=replace-with-a-long-random-token
+GITANDEM_AGENT_TOKEN=replace-with-a-different-long-random-token

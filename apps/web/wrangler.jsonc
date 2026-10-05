@@ -1,0 +1,24 @@
+{
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "gitandem",
+  "main": "src/worker.ts",
+  "compatibility_date": "2026-10-01",
+  "compatibility_flags": ["nodejs_compat"],
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "invocation_logs": true },
+    "traces": { "enabled": true }
+  },
+  "artifacts": [{ "binding": "ARTIFACTS", "namespace": "gitandem" }],
+  "containers": [{ "class_name": "WorkspaceRunner", "scheduling_policy": "durable_object" }],
+  "durable_objects": {
+    "bindings": [
+      { "name": "COORDINATOR", "class_name": "ProjectCoordinator" },
+      { "name": "WORKSPACE_RUNNER", "class_name": "WorkspaceRunner" }
+    ]
+  },
+  "migrations": [
+    { "tag": "v1", "new_sqlite_classes": ["ProjectCoordinator"] },
+    { "tag": "v2", "new_sqlite_classes": ["WorkspaceRunner"] }
+  ]
+}
