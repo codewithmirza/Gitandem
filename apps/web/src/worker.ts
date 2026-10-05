@@ -33,7 +33,7 @@ type ProjectCreation = { id: string; name: string; goal: string; constraints?: s
 type AgentIdentity = { id: string; name: string; projectId: string };
 
 async function createGitandemProject(env: Env, input: ProjectCreation) {
-  if (import.meta.env.DEV) {
+  if (import.meta.env?.DEV) {
     if (input.repositoryMode === "import") throw new Error("Remote Git import is disabled in local-only development. Use a deployed Worker with Artifacts access.");
     const snapshot = await coordinator(env, input.id).createProject({ id: input.id, name: input.name, goal: input.goal, constraints: input.constraints ?? [], decisions: input.decisions ?? [] });
     const issued = input.agentName ? await coordinator(env, input.id).createAgentCredential(input.agentName) : undefined;
@@ -64,22 +64,32 @@ async function createGitandemProject(env: Env, input: ProjectCreation) {
 }
 
 async function latestCommit(env: Env, projectId: string) {
-  if (import.meta.env.DEV) return null;
+  if (import.meta.env?.DEV) return null;
   return new ArtifactsRepository(env.ARTIFACTS).latestCommit(projectId);
 }
 
 async function revokeWorkspaceTokens(env: Env, tokens: Array<{ tokenId: string; remote: string }>) {
   const repositories = new ArtifactsRepository(env.ARTIFACTS);
   await Promise.allSettled(tokens.map(async ({ tokenId, remote }) => {
-    const parts = new URL(remote).pathname.split("/").filter(Boolean);
-    const repositoryName = parts.at(-1)?.replace(/\.git$/, "");
-    if (repositoryName && parts.at(-2) === "gitandem") await repositories.revokeToken(repositoryName, tokenId);
+    const repository = parseArtifactsRemote(remote);
+    if (repository) await repositories.revokeToken(repository.name, tokenId);
   }));
+}
+
+function parseArtifactsRemote(remote: string) {
+  let url: URL;
+  try { url = new URL(remote); } catch { return null; }
+  const parts = url.pathname.split("/").filter(Boolean);
+  const fileName = parts[2];
+  if (url.protocol !== "https:" || url.username || url.password || !url.hostname.endsWith(".artifacts.cloudflare.net") || parts.length !== 3 || parts[0] !== "git" || !parts[1] || !fileName?.endsWith(".git")) return null;
+  const name = fileName.slice(0, -4);
+  if (!/^[a-z0-9][a-z0-9-]{0,62}$/.test(name)) return null;
+  return { name, namespace: parts[1], host: url.host };
 }
 
 async function authorizeWork(env: Env, projectId: string, workId: string, actor: string) {
   const project = coordinator(env, projectId);
-  if (import.meta.env.DEV) {
+  if (import.meta.env?.DEV) {
     return { snapshot: await project.resolveWork(workId, { action: "review", actor, currentBaseCommit: undefined }), workspaceAccess: null };
   }
 
@@ -125,16 +135,17 @@ async function authorizeWork(env: Env, projectId: string, workId: string, actor:
 }
 
 async function acceptWork(env: Env, projectId: string, workId: string, actor: string) {
-  if (import.meta.env.DEV) throw new Error("Canonical repository acceptance requires a deployed Artifacts-backed project.");
+  if (import.meta.env?.DEV) throw new Error("Canonical repository acceptance requires a deployed Artifacts-backed project.");
   const project = coordinator(env, projectId);
   const before = await project.getSnapshot();
   const intent = before.work.find((item) => item.id === workId);
   const grant = before.grants.find((item) => item.workId === workId && item.status === "active");
   if (!intent?.result || intent.status !== "submitted" || !grant?.workspace || !intent.baseCommit) throw new CoordinationError("This work has no active submitted result to accept.", "result_not_submitted");
   const repositories = new ArtifactsRepository(env.ARTIFACTS);
-  const taskPath = new URL(grant.workspace.remote).pathname.split("/").filter(Boolean);
-  const taskName = taskPath.at(-1)?.replace(/\.git$/, "");
-  if (!taskName || taskPath.at(-2) !== "gitandem") throw new CoordinationError("The recorded task repository is invalid.", "workspace_remote_invalid");
+  const taskRepository = parseArtifactsRemote(grant.workspace.remote);
+  const canonicalRepository = before.project.repository ? parseArtifactsRemote(before.project.repository) : null;
+  const taskName = taskRepository?.name;
+  if (!taskRepository || !taskName || !canonicalRepository || canonicalRepository.name !== projectId || taskRepository.namespace !== canonicalRepository.namespace || taskRepository.host !== canonicalRepository.host) throw new CoordinationError("The recorded task repository is invalid or belongs to a different Artifacts namespace.", "workspace_remote_invalid");
   const [canonical, canonicalHead, taskHead, baseExists, resultExists] = await Promise.all([
     repositories.inspect(projectId),
     repositories.latestCommit(projectId),
@@ -227,7 +238,7 @@ async function api(request: Request, env: Env) {
     }
     if (request.method === "POST" && resource === "repository-token") {
       await project.getSnapshot();
-      if (import.meta.env.DEV) return json({ error: "Git access tokens require a deployed Artifacts-backed project." }, 503);
+      if (import.meta.env?.DEV) return json({ error: "Git access tokens require a deployed Artifacts-backed project." }, 503);
       const repositories = new ArtifactsRepository(env.ARTIFACTS);
       const [info, token] = await Promise.all([repositories.inspect(id), repositories.issueToken(id, "write", 900)]);
       return json({ remote: info.remote, token: token.plaintext, expiresAt: token.expiresAt });
@@ -307,7 +318,7 @@ function createServer(env: Env, identity: AgentIdentity | null) {
   server.registerTool("run_workspace_command", { description: "Run an argv command inside the isolated Linux container for an owner-authorized work intent. First use get_project_context, then propose work and ask the owner to approve it. Git credentials stay inside Gitandem; use submit_work_result to push and submit a commit.", inputSchema: { projectId: z.string().min(1), workId: z.string().min(1), argv: z.array(z.string().max(2000)).min(1).max(32) } }, async ({ projectId, workId, argv }) => {
     projectForIdentity(projectId);
     const { id: agentIdentityId, name: agent } = identity;
-    if (import.meta.env.DEV) throw new Error("Task containers require a deployed Cloudflare Worker.");
+    if (import.meta.env?.DEV) throw new Error("Task containers require a deployed Cloudflare Worker.");
     const snapshot = await coordinator(env, projectId).getSnapshot();
     const intent = snapshot.work.find((work) => work.id === workId);
     const grant = snapshot.grants.find((item) => item.workId === workId && item.status === "active");
@@ -315,9 +326,10 @@ function createServer(env: Env, identity: AgentIdentity | null) {
       throw new CoordinationError("There is no active authorized workspace for this work intent.", "workspace_not_authorized");
     }
     if (intent.agent !== agent || grant.agent !== agent || (intent.agentIdentityId && intent.agentIdentityId !== agentIdentityId)) throw new CoordinationError("This credential does not belong to the approved work intent.", "agent_mismatch");
-    const path = new URL(grant.workspace.remote).pathname.split("/").filter(Boolean);
-    const repositoryName = path.at(-1)?.replace(/\.git$/, "");
-    if (!repositoryName || path.at(-2) !== "gitandem") throw new CoordinationError("The recorded workspace remote is invalid.", "workspace_remote_invalid");
+    const repository = parseArtifactsRemote(grant.workspace.remote);
+    const canonicalRepository = snapshot.project.repository ? parseArtifactsRemote(snapshot.project.repository) : null;
+    const repositoryName = repository?.name;
+    if (!repository || !repositoryName || !canonicalRepository || canonicalRepository.name !== projectId || repository.namespace !== canonicalRepository.namespace || repository.host !== canonicalRepository.host) throw new CoordinationError("The recorded workspace remote is invalid.", "workspace_remote_invalid");
     const repositories = new ArtifactsRepository(env.ARTIFACTS);
     const token = await repositories.issueToken(repositoryName, "write", 900);
     const recorded = await coordinator(env, projectId).registerWorkspaceToken(workId, agent, grant.planRevision, token.id);
@@ -352,15 +364,16 @@ function createServer(env: Env, identity: AgentIdentity | null) {
   server.registerTool("submit_work_result", { description: "Submit a finished commit for an authorized work intent. Gitandem safely pushes the current checkout commit to the task fork using a hidden short-lived credential, verifies the fork head and approved base, and records your summary and evidence. Only the owner can accept it into the canonical repository.", inputSchema: { projectId: z.string().min(1), workId: z.string().min(1), ...SubmitWorkResultInputSchema.shape } }, async ({ projectId, workId, ...input }) => {
     projectForIdentity(projectId);
     const { id: agentIdentityId, name: agent } = identity;
-    if (import.meta.env.DEV) throw new Error("Task result verification requires a deployed Artifacts-backed project.");
+    if (import.meta.env?.DEV) throw new Error("Task result verification requires a deployed Artifacts-backed project.");
     const snapshot = await coordinator(env, projectId).getSnapshot();
     const intent = snapshot.work.find((work) => work.id === workId);
     const grant = snapshot.grants.find((item) => item.workId === workId && item.status === "active");
     if (!intent || !grant?.workspace || grant.planRevision !== snapshot.project.revision || intent.planRevision !== snapshot.project.revision) throw new CoordinationError("There is no active authorized workspace for this work intent.", "workspace_not_authorized");
     if (intent.agent !== agent || grant.agent !== agent || (intent.agentIdentityId && intent.agentIdentityId !== agentIdentityId)) throw new CoordinationError("This credential does not belong to the approved work intent.", "agent_mismatch");
-    const path = new URL(grant.workspace.remote).pathname.split("/").filter(Boolean);
-    const repositoryName = path.at(-1)?.replace(/\.git$/, "");
-    if (!repositoryName || path.at(-2) !== "gitandem") throw new CoordinationError("The recorded workspace remote is invalid.", "workspace_remote_invalid");
+    const repository = parseArtifactsRemote(grant.workspace.remote);
+    const canonicalRepository = snapshot.project.repository ? parseArtifactsRemote(snapshot.project.repository) : null;
+    const repositoryName = repository?.name;
+    if (!repository || !repositoryName || !canonicalRepository || canonicalRepository.name !== projectId || repository.namespace !== canonicalRepository.namespace || repository.host !== canonicalRepository.host) throw new CoordinationError("The recorded workspace remote is invalid.", "workspace_remote_invalid");
     const repositories = new ArtifactsRepository(env.ARTIFACTS);
     const project = coordinator(env, projectId);
     const token = await repositories.issueToken(repositoryName, "write", 900);
