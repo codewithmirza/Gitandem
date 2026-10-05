@@ -16,7 +16,7 @@ import { assessWorkPlan } from "./plan-assessment";
 import type { WorkspaceRunner } from "./workspace-runner";
 
 declare global {
-  interface Env { GITANDEM_AGENT_TOKEN?: string }
+  interface Env { GITANDEM_API_TOKEN?: string; GITANDEM_AGENT_TOKEN?: string }
 }
 
 export { ProjectCoordinator } from "./coordinator";

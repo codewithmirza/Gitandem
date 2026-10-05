@@ -5,7 +5,7 @@
   "type": "module",
   "scripts": {
     "dev": "vite",
-    "build": "tsc -b && vite build && node scripts/clean-dev-artifacts.mjs",
+    "build": "wrangler types && tsc -b && vite build && node scripts/clean-dev-artifacts.mjs",
     "preview": "vite preview",
     "cf-typegen": "wrangler types"
   },
