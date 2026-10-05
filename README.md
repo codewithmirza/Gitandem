@@ -44,13 +44,14 @@ Implemented:
 
 Next work:
 
-- Private remote import and a guided browser folder upload; a local Git folder can push to a new project repository with the short-lived token
-- Live-check the complete submit and accept flow against Cloudflare Artifacts
-- Strengthen result review with clearer commit diffs and evidence against each acceptance condition
-- User login, project membership, and owner-scoped credentials in place of deployment-wide prototype secrets
-- Fine-grained container egress and resource limits
-- Multi-user identity, project roles, and scoped credentials
-- Evaluate semantic assessments on realistic competing plans and add owner-requested explanations only where they help
+- Add user login and project membership to replace the deployment-wide owner token
+- Connect Git providers for authenticated private-repository import
+- Add a local folder import/export path that creates a verifiable Git commit
+- Protect canonical Git writes so routine changes pass through plan review and acceptance
+- Live-check a changed commit through submission and owner acceptance
+- Improve result review with commit diffs and evidence tied to acceptance conditions
+- Tighten container network and resource limits
+- Evaluate semantic assessments on realistic competing plans
 
 Gitandem is intended to become the project home itself. Existing repositories are migration paths; the imported Artifacts repository becomes the canonical copy for that Gitandem project.
 
@@ -90,6 +91,8 @@ Use separate `GITANDEM_API_TOKEN` and `GITANDEM_AGENT_TOKEN` values. The owner t
 ## Architecture
 
 See [docs/architecture.md](docs/architecture.md) for the current data flow and the boundaries between project coordination, Git history, and code execution.
+
+See [docs/target-architecture.md](docs/target-architecture.md) for the larger design Gitandem is moving toward, including user identity, provider imports, and the boundary around independent agents.
 
 See the implementation order. The project interface is a client of the coordination protocol; it is not the core product.
 
