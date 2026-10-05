@@ -32,6 +32,7 @@ export const CoordinationIssueSchema = z.object({
 
 export const WorkProposalSchema = z.object({
   agent: Text,
+  agentIdentityId: Text.optional(),
   outcome: Text,
   scope: z.array(Text).min(1),
   assumptions: TextList.default([]),

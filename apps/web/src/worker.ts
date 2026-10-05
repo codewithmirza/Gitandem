@@ -29,13 +29,16 @@ const errorMessage = (error: unknown) => error instanceof Error ? error.message 
 const authorized = (request: Request, env: Env) => Boolean(env.GITANDEM_API_TOKEN && request.headers.get("Authorization") === `Bearer ${env.GITANDEM_API_TOKEN}`);
 const authorizedAgent = (request: Request, env: Env) => Boolean(env.GITANDEM_AGENT_TOKEN && request.headers.get("Authorization") === `Bearer ${env.GITANDEM_AGENT_TOKEN}`);
 
-type ProjectCreation = { id: string; name: string; goal: string; constraints?: string[]; decisions?: Array<{ name: string; value: string }>; repositoryMode: "create" | "import"; sourceUrl?: string; sourceBranch?: string };
+type ProjectCreation = { id: string; name: string; goal: string; constraints?: string[]; decisions?: Array<{ name: string; value: string }>; repositoryMode: "create" | "import"; sourceUrl?: string; sourceBranch?: string; agentName?: string };
+type AgentIdentity = { id: string; name: string; projectId: string };
 
 async function createGitandemProject(env: Env, input: ProjectCreation) {
   if (import.meta.env.DEV) {
     if (input.repositoryMode === "import") throw new Error("Remote Git import is disabled in local-only development. Use a deployed Worker with Artifacts access.");
     const snapshot = await coordinator(env, input.id).createProject({ id: input.id, name: input.name, goal: input.goal, constraints: input.constraints ?? [], decisions: input.decisions ?? [] });
-    return { snapshot, repositoryAccess: null };
+    const issued = input.agentName ? await coordinator(env, input.id).createAgentCredential(input.agentName) : undefined;
+    const agentAccess = issued ? { ...issued, endpoint: `/mcp/${encodeURIComponent(input.id)}` } : undefined;
+    return { snapshot, repositoryAccess: null, ...(agentAccess ? { agentAccess } : {}) };
   }
   if (input.repositoryMode === "import") {
     let source: URL;
@@ -51,7 +54,9 @@ async function createGitandemProject(env: Env, input: ProjectCreation) {
   try {
     const access = await repositories.issueToken(input.id, "write", 900);
     const snapshot = await coordinator(env, input.id).createProject({ id: input.id, name: input.name, goal: input.goal, repository: created.remote, constraints: input.constraints ?? [], decisions: input.decisions ?? [] });
-    return { snapshot, repositoryAccess: { remote: created.remote, token: access.plaintext, expiresAt: access.expiresAt, defaultBranch: created.defaultBranch, importedFrom: input.repositoryMode === "import" ? input.sourceUrl : undefined } };
+    const issued = input.agentName ? await coordinator(env, input.id).createAgentCredential(input.agentName) : undefined;
+    const agentAccess = issued ? { ...issued, endpoint: `/mcp/${encodeURIComponent(input.id)}` } : undefined;
+    return { snapshot, repositoryAccess: { remote: created.remote, token: access.plaintext, expiresAt: access.expiresAt, defaultBranch: created.defaultBranch, importedFrom: input.repositoryMode === "import" ? input.sourceUrl : undefined }, ...(agentAccess ? { agentAccess } : {}) };
   } catch (error) {
     await repositories.delete(input.id).catch(() => false);
     throw error;
@@ -197,13 +202,29 @@ async function api(request: Request, env: Env) {
       const parsed = CreateProjectInputSchema.safeParse({ id: body.id, name: body.name, goal: body.goal, constraints: body.constraints ?? [] });
       if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? "Project details are invalid." }, 400);
       const mode = body.repositoryMode === "import" ? "import" : "create";
-      return json(await createGitandemProject(env, { ...parsed.data, repositoryMode: mode, sourceUrl: typeof body.sourceUrl === "string" ? body.sourceUrl : undefined, sourceBranch: typeof body.sourceBranch === "string" ? body.sourceBranch : undefined }));
+      return json(await createGitandemProject(env, { ...parsed.data, repositoryMode: mode, sourceUrl: typeof body.sourceUrl === "string" ? body.sourceUrl : undefined, sourceBranch: typeof body.sourceBranch === "string" ? body.sourceBranch : undefined, agentName: typeof body.agentName === "string" ? body.agentName : undefined }));
     }
     const match = path.match(/^\/api\/projects\/([^/]+)(?:\/(.*))?$/);
     if (!match) return json({ error: "Route not found." }, 404);
     const [, id, resource = ""] = match;
     const project = coordinator(env, id);
     if (request.method === "GET" && !resource) return json(await project.getSnapshot());
+    if (resource === "agent-credentials" && request.method === "GET") {
+      await project.getSnapshot();
+      return json({ credentials: await project.listAgentCredentials() });
+    }
+    if (resource === "agent-credentials" && request.method === "POST") {
+      await project.getSnapshot();
+      const name = z.string().trim().min(1).max(120).safeParse(body.agent);
+      if (!name.success) return json({ error: "Provide an agent name between 1 and 120 characters." }, 400);
+      const credential = await project.createAgentCredential(name.data);
+      return json({ ...credential, endpoint: `/mcp/${encodeURIComponent(id)}` }, 201);
+    }
+    const credentialAction = resource.match(/^agent-credentials\/([^/]+)$/);
+    if (request.method === "DELETE" && credentialAction) {
+      const revoked = await project.revokeAgentCredential(credentialAction[1]!);
+      return revoked ? json({ revoked: true }) : json({ error: "Agent credential not found or already revoked." }, 404);
+    }
     if (request.method === "POST" && resource === "repository-token") {
       await project.getSnapshot();
       if (import.meta.env.DEV) return json({ error: "Git access tokens require a deployed Artifacts-backed project." }, 503);
@@ -267,15 +288,25 @@ async function api(request: Request, env: Env) {
   }
 }
 
-function createServer(env: Env) {
+function createServer(env: Env, identity: AgentIdentity | null) {
   const server = new McpServer({ name: "gitandem", version: "0.2.0" });
   const toolText = (value: unknown) => ({ content: [{ type: "text" as const, text: JSON.stringify(value, null, 2) }] });
-  server.registerTool("create_project", { description: "Create a Gitandem project and its canonical Git repository, or import a public Git remote. Returns the one-time setup token to the authorized creator.", inputSchema: { ...CreateProjectInputSchema.shape, repositoryMode: z.enum(["create", "import"]).default("create"), sourceUrl: z.string().optional(), sourceBranch: z.string().optional() } }, async (input) => toolText(await createGitandemProject(env, input)));
+  if (identity === null) {
+    server.registerTool("create_project", { description: "Create a project and canonical repository. Set agentName to also create a one-time, project-scoped MCP credential for the first agent.", inputSchema: { ...CreateProjectInputSchema.shape, repositoryMode: z.enum(["create", "import"]).default("create"), sourceUrl: z.string().optional(), sourceBranch: z.string().optional(), agentName: z.string().trim().min(1).max(120).optional() } }, async (input) => toolText(await createGitandemProject(env, input)));
+    return server;
+  }
+  const projectForIdentity = (projectId: string) => {
+    if (projectId !== identity.projectId) throw new CoordinationError("This MCP credential only grants access to its own project.", "agent_credential_scope_mismatch");
+    return projectId;
+  };
   server.registerTool("get_project_context", { description: "Read the approved project goal and plan plus a limited summary of active commitments. Agent assumptions and private working context are not included.", inputSchema: { projectId: z.string().min(1) } }, async ({ projectId }) => {
+    projectForIdentity(projectId);
     const snapshot = await coordinator(env, projectId).getSnapshot();
     return toolText({ contractVersion: PROJECT_CONTRACT_VERSION, project: snapshot.project, plan: snapshot.plan, activeCommitments: snapshot.work.filter((work) => ["needs_resolution", "ready_for_review", "authorized", "in_progress", "submitted", "needs_alignment"].includes(work.status)).map(({ id, agent, outcome, scope, interfaces, designChoices, issues, status, planRevision, baseCommit, result }) => ({ id, agent, outcome, scope, interfaces, designChoices, issues, status, planRevision, baseCommit, result })) });
   });
-  server.registerTool("run_workspace_command", { description: "Run an argv command inside the isolated Linux container for an owner-authorized work intent. First use get_project_context, then ask the owner to approve the proposal. Git credentials stay inside Gitandem; use submit_work_result to push and submit a commit.", inputSchema: { projectId: z.string().min(1), workId: z.string().min(1), agent: z.string().min(1), argv: z.array(z.string().max(2000)).min(1).max(32) } }, async ({ projectId, workId, agent, argv }) => {
+  server.registerTool("run_workspace_command", { description: "Run an argv command inside the isolated Linux container for an owner-authorized work intent. First use get_project_context, then propose work and ask the owner to approve it. Git credentials stay inside Gitandem; use submit_work_result to push and submit a commit.", inputSchema: { projectId: z.string().min(1), workId: z.string().min(1), argv: z.array(z.string().max(2000)).min(1).max(32) } }, async ({ projectId, workId, argv }) => {
+    projectForIdentity(projectId);
+    const { id: agentIdentityId, name: agent } = identity;
     if (import.meta.env.DEV) throw new Error("Task containers require a deployed Cloudflare Worker.");
     const snapshot = await coordinator(env, projectId).getSnapshot();
     const intent = snapshot.work.find((work) => work.id === workId);
@@ -283,7 +314,7 @@ function createServer(env: Env) {
     if (!intent || !grant || !grant.workspace || intent.status !== "authorized" || grant.planRevision !== snapshot.project.revision || intent.planRevision !== snapshot.project.revision) {
       throw new CoordinationError("There is no active authorized workspace for this work intent.", "workspace_not_authorized");
     }
-    if (intent.agent !== agent || grant.agent !== agent) throw new CoordinationError("The agent label must match the approved proposal.", "agent_mismatch");
+    if (intent.agent !== agent || grant.agent !== agent || (intent.agentIdentityId && intent.agentIdentityId !== agentIdentityId)) throw new CoordinationError("This credential does not belong to the approved work intent.", "agent_mismatch");
     const path = new URL(grant.workspace.remote).pathname.split("/").filter(Boolean);
     const repositoryName = path.at(-1)?.replace(/\.git$/, "");
     if (!repositoryName || path.at(-2) !== "gitandem") throw new CoordinationError("The recorded workspace remote is invalid.", "workspace_remote_invalid");
@@ -318,13 +349,15 @@ function createServer(env: Env) {
       await repositories.revokeToken(repositoryName, token.id).catch(() => false);
     }
   });
-  server.registerTool("submit_work_result", { description: "Submit a finished commit for an authorized work intent. Gitandem safely pushes the current checkout commit to the task fork using a hidden short-lived credential, verifies the fork head and approved base, and records your summary and evidence. Only the owner can accept it into the canonical repository.", inputSchema: { projectId: z.string().min(1), workId: z.string().min(1), agent: z.string().min(1), ...SubmitWorkResultInputSchema.shape } }, async ({ projectId, workId, agent, ...input }) => {
+  server.registerTool("submit_work_result", { description: "Submit a finished commit for an authorized work intent. Gitandem safely pushes the current checkout commit to the task fork using a hidden short-lived credential, verifies the fork head and approved base, and records your summary and evidence. Only the owner can accept it into the canonical repository.", inputSchema: { projectId: z.string().min(1), workId: z.string().min(1), ...SubmitWorkResultInputSchema.shape } }, async ({ projectId, workId, ...input }) => {
+    projectForIdentity(projectId);
+    const { id: agentIdentityId, name: agent } = identity;
     if (import.meta.env.DEV) throw new Error("Task result verification requires a deployed Artifacts-backed project.");
     const snapshot = await coordinator(env, projectId).getSnapshot();
     const intent = snapshot.work.find((work) => work.id === workId);
     const grant = snapshot.grants.find((item) => item.workId === workId && item.status === "active");
     if (!intent || !grant?.workspace || grant.planRevision !== snapshot.project.revision || intent.planRevision !== snapshot.project.revision) throw new CoordinationError("There is no active authorized workspace for this work intent.", "workspace_not_authorized");
-    if (intent.agent !== agent || grant.agent !== agent) throw new CoordinationError("The agent label must match the approved proposal.", "agent_mismatch");
+    if (intent.agent !== agent || grant.agent !== agent || (intent.agentIdentityId && intent.agentIdentityId !== agentIdentityId)) throw new CoordinationError("This credential does not belong to the approved work intent.", "agent_mismatch");
     const path = new URL(grant.workspace.remote).pathname.split("/").filter(Boolean);
     const repositoryName = path.at(-1)?.replace(/\.git$/, "");
     if (!repositoryName || path.at(-2) !== "gitandem") throw new CoordinationError("The recorded workspace remote is invalid.", "workspace_remote_invalid");
@@ -351,7 +384,10 @@ function createServer(env: Env) {
       await repositories.revokeToken(repositoryName, token.id).catch(() => false);
     }
   });
-  server.registerTool("propose_work", { description: "Before coding, submit the intended outcome, scope, assumptions, interfaces, named design choices, dependencies, and acceptance evidence. Gitandem compares exact declared scope and named choices against the shared plan and other active intents. Conflicts need owner resolution before authorization; Gitandem does not infer unspoken semantic conflicts.", inputSchema: { projectId: z.string().min(1), ...SubmitWorkInputSchema.omit({ baseCommit: true }).shape } }, async ({ projectId, ...input }) => toolText(await coordinator(env, projectId).submitWork({ ...input, baseCommit: await latestCommit(env, projectId) ?? undefined })));
+  server.registerTool("propose_work", { description: "Before coding, submit intended outcome, scope, assumptions, interfaces, named design choices, dependencies, and acceptance evidence. Gitandem compares declarations with the shared plan and other active intents. The credential sets the agent identity; caller-supplied agent names are not accepted.", inputSchema: { projectId: z.string().min(1), ...SubmitWorkInputSchema.omit({ baseCommit: true, agent: true, agentIdentityId: true }).shape } }, async ({ projectId, ...input }) => {
+    projectForIdentity(projectId);
+    return toolText(await coordinator(env, projectId).submitWork({ ...input, agent: identity.name, agentIdentityId: identity.id, baseCommit: await latestCommit(env, projectId) ?? undefined }));
+  });
   return server;
 }
 
@@ -360,7 +396,16 @@ export default {
     const url = new URL(request.url);
     if (url.pathname === "/mcp") {
       if (!authorizedAgent(request, env)) return json({ error: "Unauthorized agent connection." }, 401);
-      return createMcpHandler(() => createServer(env), { route: "/mcp" })(request, env, ctx);
+      return createMcpHandler(() => createServer(env, null), { route: "/mcp" })(request, env, ctx);
+    }
+    const projectMcp = url.pathname.match(/^\/mcp\/([a-z0-9][a-z0-9-]{1,62})$/);
+    if (projectMcp) {
+      const projectId = projectMcp[1]!;
+      const token = request.headers.get("Authorization")?.replace(/^Bearer\s+/i, "") ?? "";
+      const credential = await coordinator(env, projectId).authenticateAgentCredential(token);
+      if (!credential) return json({ error: "Unauthorized project agent credential." }, 401);
+      const identity = { ...credential, projectId };
+      return createMcpHandler(() => createServer(env, identity), { route: url.pathname })(request, env, ctx);
     }
     if (url.pathname.startsWith("/api/")) {
       if (!authorized(request, env)) return json({ error: "Unauthorized. Set GITANDEM_API_TOKEN for this deployment." }, 401);

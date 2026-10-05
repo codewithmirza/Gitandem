@@ -21,10 +21,11 @@ type ProjectRow = { id: string; name: string; repository: string | null; revisio
 type WorkRow = { id: string; agent: string; details: string; status: string; reasons: string; plan_revision: number; base_commit: string | null; created_at: string };
 type GrantRow = { id: string; work_id: string; agent: string; plan_revision: number; base_commit: string | null; workspace: string | null; status: string; created_at: string };
 type ActivityRow = { id: number; actor: string; detail: string; created_at: string };
-type WorkDetails = Pick<WorkIntent, "agent" | "outcome" | "scope" | "assumptions" | "interfaces" | "dependencies" | "acceptance" | "result">;
+type WorkDetails = Pick<WorkIntent, "agent" | "agentIdentityId" | "outcome" | "scope" | "assumptions" | "interfaces" | "dependencies" | "acceptance" | "result">;
 
 const detailsOf = (work: WorkIntent): WorkDetails => ({
   agent: work.agent,
+  ...(work.agentIdentityId ? { agentIdentityId: work.agentIdentityId } : {}),
   outcome: work.outcome,
   scope: work.scope,
   assumptions: work.assumptions,

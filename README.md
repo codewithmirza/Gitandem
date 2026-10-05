@@ -37,6 +37,7 @@ Implemented:
 - Store project state in one SQLite-backed Durable Object per project
 - Fork an approved intent's exact base commit into its own Artifacts repository
 - Run authorized argv commands in a managed Linux container with the task fork mounted as its working repository
+- Issue revocable, project-scoped MCP credentials; derive agent identity from its credential and store only a token hash
 - Keep per-task Git credentials inside Gitandem and revoke them after each command
 - Verify a submitted task commit is the task fork head and includes the approved base commit
 - Let the owner fast-forward the canonical branch to that submitted commit; revoke the work grant after acceptance
@@ -46,7 +47,7 @@ Next work:
 - Private remote import and a guided browser folder upload; a local Git folder can push to a new project repository with the short-lived token
 - Live-check the complete submit and accept flow against Cloudflare Artifacts
 - Strengthen result review with clearer commit diffs and evidence against each acceptance condition
-- Strong user, project, and cryptographic agent identities in place of deployment-wide prototype secrets
+- User login, project membership, and owner-scoped credentials in place of deployment-wide prototype secrets
 - Fine-grained container egress and resource limits
 - Multi-user identity, project roles, and scoped credentials
 - Evaluate semantic assessments on realistic competing plans and add owner-requested explanations only where they help
@@ -80,11 +81,11 @@ pnpm cf-typegen
 
 ## API and agent access
 
-Owner REST routes use `Authorization: Bearer <GITANDEM_API_TOKEN>`. MCP uses a separate `GITANDEM_AGENT_TOKEN`. An agent can submit a result via MCP; only the owner REST interface can accept it into the canonical branch.
+Owner REST routes use `Authorization: Bearer <GITANDEM_API_TOKEN>`. The deployment-wide `GITANDEM_AGENT_TOKEN` is a bootstrap credential for project creation; agents use project-specific MCP credentials for project work. An agent can submit a result via MCP; only the owner REST interface can accept it into the canonical branch.
 
 REST routes are documented in [docs/api.md](docs/api.md). The MCP server exposes tools to create a project, read its context, propose work, run commands after owner authorization, and submit a finished commit. MCP is an interface an agent can use to work with Gitandem; it does not require a separate agent-to-agent protocol.
 
-Use separate `GITANDEM_API_TOKEN` and `GITANDEM_AGENT_TOKEN` values. The owner token guards REST; the agent token guards MCP, whose tools cannot update the plan, authorize work, or accept results. These are deployment-wide prototype secrets, not a user or membership system. The runner currently has Internet access and limits each command to 120 seconds. The owner acceptance path has not yet had a live end-to-end check.
+Use separate `GITANDEM_API_TOKEN` and `GITANDEM_AGENT_TOKEN` values. The owner token guards REST. The bootstrap token only creates projects; each project agent receives a revocable credential scoped to that project's MCP endpoint. Project credentials are stored as hashes, and proposal identity comes from the credential rather than a caller-supplied label. The owner and bootstrap tokens remain deployment-wide prototype secrets, not a user or membership system. The runner currently has Internet access and limits each command to 120 seconds. The owner acceptance path has not yet had a live end-to-end check.
 
 ## Architecture
 
