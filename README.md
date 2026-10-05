@@ -31,7 +31,7 @@ Implemented:
 - Maintain versioned shared plans and decisions
 - Submit work intents through the web UI, REST API, or MCP
 - Detect exact scope overlap, conflicting proposals for named interfaces, and differences in named design choices or shared plan decisions
-- Assess a proposal's fit with the shared plan and compare active proposals using direct Workers AI inference (no AI Gateway); show model scores as advice only
+- Assess a proposal's fit with the shared plan and compare up to eight relevant active proposals using direct Workers AI inference (no AI Gateway); bound model input and show scores as advice only
 - Hold conflicting work for resolution and review conflict-free work before authorization
 - Bind grants to a plan revision and revoke them when that plan changes
 - Store project state in one SQLite-backed Durable Object per project
@@ -49,7 +49,7 @@ Next work:
 - Strong user, project, and cryptographic agent identities in place of deployment-wide prototype secrets
 - Fine-grained container egress and resource limits
 - Multi-user identity, project roles, and scoped credentials
-- Automatic semantic interpretation or resolution of competing plans
+- Evaluate semantic assessments on realistic competing plans and add owner-requested explanations only where they help
 
 Gitandem is intended to become the project home itself. Existing repositories are migration paths; the imported Artifacts repository becomes the canonical copy for that Gitandem project.
 

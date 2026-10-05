@@ -39,7 +39,11 @@ class MemoryStore implements CoordinationStore {
     this.snapshot = {
       ...current,
       work: current.work.map((item) => item.id === intent.id ? intent : item),
-      grants: grant ? [grant, ...current.grants] : current.grants,
+      grants: grant
+        ? grant.status === "revoked"
+          ? current.grants.map((item) => item.id === grant.id ? grant : item)
+          : [grant, ...current.grants]
+        : current.grants,
       activity: [...current.activity, { ...event, id: current.activity.length + 1 }],
     };
   }
@@ -139,6 +143,42 @@ describe("Gitandem coordination contract v2", () => {
     const accepted = service.acceptResult("id-1", "Owner", commit);
     expect(accepted.work[0]?.status).toBe("accepted");
     expect(accepted.grants[0]?.status).toBe("revoked");
+  });
+
+  it("authorizes an intent only once and never reactivates terminal work", () => {
+    const { service } = setup();
+    service.submitWork(proposal());
+    const authorized = service.resolveWork("id-1", { action: "review", actor: "Owner", currentBaseCommit: "commit-1", workspace: { remote: "https://example.test/task.git", defaultBranch: "main" } });
+    expect(authorized.grants.filter((grant) => grant.status === "active")).toHaveLength(1);
+    expect(() => service.resolveWork("id-1", { action: "review", actor: "Owner", currentBaseCommit: "commit-1" }))
+      .toThrowError(expect.objectContaining({ code: "invalid_work_transition" }));
+
+    const submitted = service.submitResult("id-1", { commit: "a".repeat(40), summary: "Done", evidence: ["Checks passed"] });
+    expect(submitted.work[0]?.status).toBe("submitted");
+    expect(() => service.resolveWork("id-1", { action: "review", actor: "Owner", currentBaseCommit: "commit-1" }))
+      .toThrowError(expect.objectContaining({ code: "invalid_work_transition" }));
+    const accepted = service.acceptResult("id-1", "Owner", "a".repeat(40));
+    expect(() => service.resolveWork("id-1", { action: "reject", actor: "Owner", currentBaseCommit: "commit-1" }))
+      .toThrowError(expect.objectContaining({ code: "invalid_work_transition" }));
+    expect(accepted.grants.filter((grant) => grant.status === "active")).toHaveLength(0);
+  });
+
+  it("revokes an active workspace grant when its work is rejected", () => {
+    const { service } = setup();
+    service.submitWork(proposal());
+    service.resolveWork("id-1", { action: "review", actor: "Owner", currentBaseCommit: "commit-1", workspace: { remote: "https://example.test/task.git", defaultBranch: "main" } });
+    const rejected = service.resolveWork("id-1", { action: "reject", actor: "Owner" });
+    expect(rejected.work[0]?.status).toBe("rejected");
+    expect(rejected.grants[0]?.status).toBe("revoked");
+  });
+
+  it("allows an owner to reject stale work but does not authorize it", () => {
+    const { service } = setup();
+    service.submitWork(proposal());
+    service.updatePlan({ goal: "A new goal", constraints: [], decisions: [], actor: "Owner" });
+    const rejected = service.resolveWork("id-1", { action: "reject", actor: "Owner" });
+    expect(rejected.work[0]?.status).toBe("rejected");
+    expect(rejected.grants).toHaveLength(0);
   });
 
   it("invalidates grants and sends pending work back for alignment on plan change", () => {

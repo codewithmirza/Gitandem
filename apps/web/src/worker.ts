@@ -63,6 +63,15 @@ async function latestCommit(env: Env, projectId: string) {
   return new ArtifactsRepository(env.ARTIFACTS).latestCommit(projectId);
 }
 
+async function revokeWorkspaceTokens(env: Env, tokens: Array<{ tokenId: string; remote: string }>) {
+  const repositories = new ArtifactsRepository(env.ARTIFACTS);
+  await Promise.allSettled(tokens.map(async ({ tokenId, remote }) => {
+    const parts = new URL(remote).pathname.split("/").filter(Boolean);
+    const repositoryName = parts.at(-1)?.replace(/\.git$/, "");
+    if (repositoryName && parts.at(-2) === "gitandem") await repositories.revokeToken(repositoryName, tokenId);
+  }));
+}
+
 async function authorizeWork(env: Env, projectId: string, workId: string, actor: string) {
   const project = coordinator(env, projectId);
   if (import.meta.env.DEV) {
@@ -206,12 +215,7 @@ async function api(request: Request, env: Env) {
       const parsed = UpdateProjectPlanInputSchema.safeParse({ ...body, actor: body.actor ?? "Project owner" });
       if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? "Plan details are invalid." }, 400);
       const updated = await project.updatePlan(parsed.data);
-      const repositories = new ArtifactsRepository(env.ARTIFACTS);
-      await Promise.allSettled(updated.workspaceTokens.map(async ({ tokenId, remote }) => {
-        const parts = new URL(remote).pathname.split("/").filter(Boolean);
-        const repositoryName = parts.at(-1)?.replace(/\.git$/, "");
-        if (repositoryName && parts.at(-2) === "gitandem") await repositories.revokeToken(repositoryName, tokenId);
-      }));
+      await revokeWorkspaceTokens(env, updated.workspaceTokens);
       return json(updated.snapshot);
     }
     if (request.method === "POST" && resource === "work-intents") {
@@ -248,14 +252,17 @@ async function api(request: Request, env: Env) {
     if (request.method === "POST" && action) {
       if (action[2] === "review") return json(await authorizeWork(env, id, action[1]!, body.actor ?? "Project owner"));
       if (action[2] === "accept") return json(await acceptWork(env, id, action[1]!, body.actor ?? "Project owner"));
-      return json(await project.resolveWork(action[1]!, { action: "reject", actor: body.actor ?? "Project owner" }));
+      const rejected = await project.rejectWork(action[1]!, body.actor ?? "Project owner");
+      await revokeWorkspaceTokens(env, rejected.workspaceTokens);
+      return json(rejected.snapshot);
     }
     return json({ error: "Route not found." }, 404);
   } catch (error) {
     const message = errorMessage(error);
+    const remoteCoordinationConflict = /only work that is ready for review|resolve the listed .*before review|uses an older plan|already being accepted|no active authorized workspace/i.test(message);
     const status = error instanceof CoordinationError
       ? error.code === "project_not_found" || error.code === "work_intent_not_found" ? 404 : 409
-      : /not found/i.test(message) ? 404 : 400;
+      : remoteCoordinationConflict ? 409 : /not found/i.test(message) ? 404 : 400;
     return json({ error: message }, status);
   }
 }

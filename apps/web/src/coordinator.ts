@@ -47,6 +47,21 @@ export class ProjectCoordinator extends DurableObject<Env> {
     if (lock) throw new Error("This result is being accepted. Try again after acceptance finishes.");
     return (await this.service()).resolveWork(id, input);
   }
+  async rejectWork(id: string, actor: string) {
+    const service = await this.service();
+    const before = service.getSnapshot();
+    const grant = before.grants.find((item) => item.workId === id && item.status === "active");
+    const tokens = grant
+      ? this.ctx.storage.sql.exec<{ token_id: string }>("SELECT token_id FROM workspace_tokens WHERE grant_id = ?", grant.id).toArray()
+      : [];
+    const snapshot = service.resolveWork(id, { action: "reject", actor });
+    return {
+      snapshot,
+      workspaceTokens: grant?.workspace
+        ? tokens.map(({ token_id }) => ({ tokenId: token_id, remote: grant.workspace!.remote }))
+        : [],
+    };
+  }
   async submitResult(id: string, input: Parameters<CoordinationService["submitResult"]>[1]) {
     const lock = this.ctx.storage.sql.exec<{ work_id: string }>("SELECT work_id FROM acceptance_locks WHERE work_id = ?", id).toArray()[0];
     if (lock) throw new Error("This result is already being accepted.");

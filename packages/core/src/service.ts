@@ -48,6 +48,14 @@ const activeStatuses = new Set<WorkStatus>([
   "submitted",
 ]);
 const pendingStatuses = new Set<WorkStatus>([...activeStatuses, "needs_alignment"]);
+const rejectableStatuses = new Set<WorkStatus>([
+  "needs_resolution",
+  "ready_for_review",
+  "authorized",
+  "in_progress",
+  "submitted",
+  "needs_alignment",
+]);
 
 const cleanList = (values: string[]) => [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 
@@ -250,14 +258,15 @@ export class CoordinationService {
     const snapshot = this.getSnapshot();
     const intent = snapshot.work.find((item) => item.id === id);
     if (!intent) throw new CoordinationError("Work intent not found.", "work_intent_not_found");
-    if (intent.planRevision !== snapshot.project.revision || intent.status === "needs_alignment") {
-      throw new CoordinationError("This intent uses an older plan. Ask the agent to resubmit it against the current plan.", "stale_plan");
-    }
     const now = this.runtime.now();
 
     if (value.action === "reject") {
+      if (!rejectableStatuses.has(intent.status)) {
+        throw new CoordinationError("This work can no longer be rejected from its current status.", "invalid_work_transition");
+      }
       const rejected = WorkIntentSchema.parse({ ...intent, status: "rejected" });
-      this.store.resolveWorkIntent(rejected, null, {
+      const grant = snapshot.grants.find((item) => item.workId === id && item.status === "active");
+      this.store.resolveWorkIntent(rejected, grant ? { ...grant, status: "revoked" } : null, {
         actor: value.actor,
         detail: `Rejected the work intent “${intent.outcome}”.`,
         createdAt: now,
@@ -265,8 +274,14 @@ export class CoordinationService {
       return this.getSnapshot();
     }
 
+    if (intent.planRevision !== snapshot.project.revision || intent.status === "needs_alignment") {
+      throw new CoordinationError("This intent uses an older plan. Ask the agent to resubmit it against the current plan.", "stale_plan");
+    }
     if (intent.status === "needs_resolution") {
       throw new CoordinationError("Resolve the listed scope, interface, or design-choice conflicts before review.", "unresolved_conflict");
+    }
+    if (intent.status !== "ready_for_review") {
+      throw new CoordinationError("Only work that is ready for review can be authorized.", "invalid_work_transition");
     }
     if ((intent.baseCommit ?? null) !== (value.currentBaseCommit ?? null)) {
       const issue = this.issue(intent.id, "repository_changed", "The repository changed after this intent was submitted. Resubmit it against the latest commit.");
