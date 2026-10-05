@@ -125,7 +125,23 @@ export class CoordinationService {
     const interfaces = value.interfaces
       .map((item) => ({ name: item.name.trim(), proposal: item.proposal.trim() }))
       .filter((item) => item.name && item.proposal);
+    const designChoices = value.designChoices
+      .map((item) => ({ name: item.name.trim(), proposal: item.proposal.trim() }))
+      .filter((item) => item.name && item.proposal);
     const issues: CoordinationIssue[] = [];
+
+    for (const choice of designChoices) {
+      const agreedDecision = snapshot.plan.decisions.find((item) => item.name.toLowerCase() === choice.name.toLowerCase());
+      if (agreedDecision && agreedDecision.value !== choice.proposal) {
+        issues.push(this.issue(
+          id,
+          "plan_decision_conflict",
+          `This proposal differs from the shared plan decision “${agreedDecision.name}”.`,
+          undefined,
+          choice.name,
+        ));
+      }
+    }
 
     for (const existing of snapshot.work.filter((item) => activeStatuses.has(item.status))) {
       const overlap = scope.filter((item) => existing.scope.includes(item));
@@ -150,6 +166,18 @@ export class CoordinationService {
           ));
         }
       }
+      for (const choice of designChoices) {
+        const prior = existing.designChoices.find((item) => item.name.toLowerCase() === choice.name.toLowerCase());
+        if (prior && prior.proposal !== choice.proposal) {
+          issues.push(this.issue(
+            id,
+            "design_conflict",
+            `Agents propose different choices for “${choice.name}”.`,
+            existing.id,
+            choice.name,
+          ));
+        }
+      }
     }
 
     const uniqueIssues = [...new Map(issues.map((item) => [item.id, item])).values()];
@@ -158,6 +186,7 @@ export class CoordinationService {
       ...value,
       scope,
       interfaces,
+      designChoices,
       issues: uniqueIssues,
       status: uniqueIssues.length ? "needs_resolution" : "ready_for_review",
       planRevision: snapshot.project.revision,
@@ -237,7 +266,7 @@ export class CoordinationService {
     }
 
     if (intent.status === "needs_resolution") {
-      throw new CoordinationError("Resolve the listed scope or interface conflicts before review.", "unresolved_conflict");
+      throw new CoordinationError("Resolve the listed scope, interface, or design-choice conflicts before review.", "unresolved_conflict");
     }
     if ((intent.baseCommit ?? null) !== (value.currentBaseCommit ?? null)) {
       const issue = this.issue(intent.id, "repository_changed", "The repository changed after this intent was submitted. Resubmit it against the latest commit.");

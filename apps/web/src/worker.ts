@@ -12,6 +12,7 @@ import {
 import { z } from "zod";
 import type { ProjectCoordinator } from "./coordinator";
 import { ArtifactsRepository } from "./artifacts-repository";
+import { assessWorkPlan } from "./plan-assessment";
 import type { WorkspaceRunner } from "./workspace-runner";
 
 declare global {
@@ -218,6 +219,31 @@ async function api(request: Request, env: Env) {
       if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? "Work intent is invalid." }, 400);
       return json(await project.submitWork(parsed.data));
     }
+    const assessment = resource.match(/^work-intents\/([^/]+)\/assessment$/);
+    if (request.method === "POST" && assessment) {
+      const snapshot = await project.getSnapshot();
+      const intent = snapshot.work.find((item) => item.id === assessment[1]);
+      if (!intent || !["needs_resolution", "ready_for_review", "authorized", "in_progress", "submitted", "needs_alignment"].includes(intent.status)) {
+        throw new CoordinationError("Only active work proposals can be assessed.", "work_intent_not_found");
+      }
+      try {
+        return json(await assessWorkPlan(snapshot, intent.id, env.AI));
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "";
+        const category = /model.{0,30}(not found|unavailable|unsupported)/i.test(message) ? "model unavailable"
+          : /(401|403|unauthori[sz]ed|forbidden|authentication)/i.test(message) ? "authentication rejected"
+            : /(429|rate.?limit|quota|credits|billing)/i.test(message) ? "usage limit or billing restriction"
+              : /(400|bad request|invalid|validation|schema)/i.test(message) ? "request rejected"
+                : "provider error";
+        const diagnostic = error instanceof z.ZodError
+          ? `Invalid model response fields: ${error.issues.map((issue) => issue.path.join(".")).join(", ")}`
+          : error instanceof Error
+            ? `${error.name} (${category})${typeof error === "object" && "status" in error ? ` status=${String(error.status)}` : ""}${typeof error === "object" && "code" in error ? ` code=${String(error.code)}` : ""}`
+            : "Unknown error";
+        console.error(`Workers AI plan assessment failed (${diagnostic}).`);
+        return json({ error: "Gitandem could not assess this plan right now. The proposal and project plan are unchanged." }, 502);
+      }
+    }
     const action = resource.match(/^work-intents\/([^/]+)\/(review|reject|accept)$/);
     if (request.method === "POST" && action) {
       if (action[2] === "review") return json(await authorizeWork(env, id, action[1]!, body.actor ?? "Project owner"));
@@ -240,7 +266,7 @@ function createServer(env: Env) {
   server.registerTool("create_project", { description: "Create a Gitandem project and its canonical Git repository, or import a public Git remote. Returns the one-time setup token to the authorized creator.", inputSchema: { ...CreateProjectInputSchema.shape, repositoryMode: z.enum(["create", "import"]).default("create"), sourceUrl: z.string().optional(), sourceBranch: z.string().optional() } }, async (input) => toolText(await createGitandemProject(env, input)));
   server.registerTool("get_project_context", { description: "Read the approved project goal and plan plus a limited summary of active commitments. Agent assumptions and private working context are not included.", inputSchema: { projectId: z.string().min(1) } }, async ({ projectId }) => {
     const snapshot = await coordinator(env, projectId).getSnapshot();
-    return toolText({ contractVersion: PROJECT_CONTRACT_VERSION, project: snapshot.project, plan: snapshot.plan, activeCommitments: snapshot.work.filter((work) => ["needs_resolution", "ready_for_review", "authorized", "in_progress", "submitted", "needs_alignment"].includes(work.status)).map(({ id, agent, outcome, scope, interfaces, issues, status, planRevision, baseCommit, result }) => ({ id, agent, outcome, scope, interfaces, issues, status, planRevision, baseCommit, result })) });
+    return toolText({ contractVersion: PROJECT_CONTRACT_VERSION, project: snapshot.project, plan: snapshot.plan, activeCommitments: snapshot.work.filter((work) => ["needs_resolution", "ready_for_review", "authorized", "in_progress", "submitted", "needs_alignment"].includes(work.status)).map(({ id, agent, outcome, scope, interfaces, designChoices, issues, status, planRevision, baseCommit, result }) => ({ id, agent, outcome, scope, interfaces, designChoices, issues, status, planRevision, baseCommit, result })) });
   });
   server.registerTool("run_workspace_command", { description: "Run an argv command inside the isolated Linux container for an owner-authorized work intent. First use get_project_context, then ask the owner to approve the proposal. Git credentials stay inside Gitandem; use submit_work_result to push and submit a commit.", inputSchema: { projectId: z.string().min(1), workId: z.string().min(1), agent: z.string().min(1), argv: z.array(z.string().max(2000)).min(1).max(32) } }, async ({ projectId, workId, agent, argv }) => {
     if (import.meta.env.DEV) throw new Error("Task containers require a deployed Cloudflare Worker.");
@@ -318,7 +344,7 @@ function createServer(env: Env) {
       await repositories.revokeToken(repositoryName, token.id).catch(() => false);
     }
   });
-  server.registerTool("propose_work", { description: "Submit the intended outcome, scope, assumptions, interfaces, dependencies, and acceptance evidence before coding. Gitandem checks explicit scope and interface collisions and records the current repository commit as the base. Conflicts or uncertainty must be resolved before authorization.", inputSchema: { projectId: z.string().min(1), ...SubmitWorkInputSchema.omit({ baseCommit: true }).shape } }, async ({ projectId, ...input }) => toolText(await coordinator(env, projectId).submitWork({ ...input, baseCommit: await latestCommit(env, projectId) ?? undefined })));
+  server.registerTool("propose_work", { description: "Before coding, submit the intended outcome, scope, assumptions, interfaces, named design choices, dependencies, and acceptance evidence. Gitandem compares exact declared scope and named choices against the shared plan and other active intents. Conflicts need owner resolution before authorization; Gitandem does not infer unspoken semantic conflicts.", inputSchema: { projectId: z.string().min(1), ...SubmitWorkInputSchema.omit({ baseCommit: true }).shape } }, async ({ projectId, ...input }) => toolText(await coordinator(env, projectId).submitWork({ ...input, baseCommit: await latestCommit(env, projectId) ?? undefined })));
   return server;
 }
 

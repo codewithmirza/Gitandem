@@ -68,10 +68,10 @@ const proposal = (overrides: Partial<Parameters<CoordinationService["submitWork"
   ...overrides,
 });
 
-describe("Gitandem coordination contract v1", () => {
+describe("Gitandem coordination contract v2", () => {
   it("returns a versioned snapshot and rejects incomplete work proposals", () => {
     const { service } = setup();
-    expect(service.getSnapshot().contractVersion).toBe(1);
+    expect(service.getSnapshot().contractVersion).toBe(PROJECT_CONTRACT_VERSION);
     expect(() => service.submitWork(proposal({ scope: [], acceptance: [] }))).toThrow();
   });
 
@@ -87,6 +87,58 @@ describe("Gitandem coordination contract v1", () => {
     expect(conflict.status).toBe("needs_resolution");
     expect(conflict.issues.map((issue) => issue.kind)).toEqual(["scope_overlap", "interface_mismatch"]);
     expect(conflict.issues[0]?.relatedWorkIntentId).toBe(snapshot.work[1]?.id);
+  });
+
+  it("catches different agent designs for one feature even when their code scopes and APIs do not overlap", () => {
+    const { service } = setup();
+    service.submitWork(proposal({
+      agent: "Snapshot agent",
+      outcome: "Resume work from a versioned session snapshot",
+      scope: ["session snapshot bundle", "restore path validation"],
+      interfaces: [{ name: "save_work_session", proposal: "Store versioned files in a per-work Artifacts sidecar." }],
+      designChoices: [{ name: "Session recovery authority", proposal: "Versioned files in a per-work Artifacts sidecar; the coordinator stores a manifest." }],
+    }));
+    const contested = service.submitWork(proposal({
+      agent: "Journal agent",
+      outcome: "Resume work by replaying durable execution events",
+      scope: ["command lifecycle journal", "checkpoint replay"],
+      interfaces: [{ name: "WorkSessionJournal", proposal: "Append ordered events to coordinator SQLite." }],
+      designChoices: [{ name: "session recovery authority", proposal: "Coordinator SQLite event log is authoritative; there is no sidecar snapshot repository." }],
+    }));
+
+    expect(contested.work[0]?.status).toBe("needs_resolution");
+    expect(contested.work[0]?.issues.map((issue) => issue.kind)).toEqual(["design_conflict"]);
+    expect(contested.work[0]?.issues[0]?.relatedWorkIntentId).toBe(contested.work[1]?.id);
+  });
+
+  it("holds an agent proposal that contradicts a named choice in the shared plan", () => {
+    const { service } = setup();
+    service.updatePlan({
+      goal: "A plan-led project",
+      constraints: [],
+      decisions: [{ name: "Session recovery authority", value: "Versioned files in a per-work Artifact sidecar." }],
+      actor: "Owner",
+    });
+    const snapshot = service.submitWork(proposal({
+      designChoices: [{ name: "session recovery authority", proposal: "Coordinator SQLite event log is authoritative." }],
+    }));
+
+    expect(snapshot.work[0]?.status).toBe("needs_resolution");
+    expect(snapshot.work[0]?.issues.map((issue) => issue.kind)).toEqual(["plan_decision_conflict"]);
+  });
+
+  it("records a submitted result and accepts only the canonical commit while revoking its grant", () => {
+    const { service } = setup();
+    service.submitWork(proposal());
+    service.resolveWork("id-1", { action: "review", actor: "Owner", currentBaseCommit: "commit-1", workspace: { remote: "https://example.test/task.git", defaultBranch: "main" } });
+    const commit = "a".repeat(40);
+    const submitted = service.submitResult("id-1", { commit, summary: "Finished settings work", evidence: ["Build succeeds"] });
+    expect(submitted.work[0]?.status).toBe("submitted");
+    expect(() => service.acceptResult("id-1", "Owner", "b".repeat(40))).toThrow(/canonical branch/);
+
+    const accepted = service.acceptResult("id-1", "Owner", commit);
+    expect(accepted.work[0]?.status).toBe("accepted");
+    expect(accepted.grants[0]?.status).toBe("revoked");
   });
 
   it("invalidates grants and sends pending work back for alignment on plan change", () => {

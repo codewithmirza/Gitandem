@@ -3,6 +3,7 @@ import react from "@vitejs/plugin-react";
 import { defineConfig } from "vite";
 
 export default defineConfig({
-  // Keep Vite development local. Remote preview requires an eligible Cloudflare plan.
-  plugins: [react(), cloudflare({ remoteBindings: false })],
+  // Use bindings explicitly marked `remote` (Workers AI) while keeping unmarked
+  // storage and Durable Object bindings local during development.
+  plugins: [react(), cloudflare({ remoteBindings: true })],
 });

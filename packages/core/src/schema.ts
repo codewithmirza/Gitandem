@@ -1,6 +1,6 @@
 import { z } from "zod";
 
-export const PROJECT_CONTRACT_VERSION = 1 as const;
+export const PROJECT_CONTRACT_VERSION = 2 as const;
 
 const Text = z.string().trim().min(1);
 const TextList = z.array(Text);
@@ -24,7 +24,7 @@ export const ProjectPlanSchema = z.object({
 
 export const CoordinationIssueSchema = z.object({
   id: Text,
-  kind: z.enum(["scope_overlap", "interface_mismatch", "plan_changed", "repository_changed", "legacy"]),
+  kind: z.enum(["scope_overlap", "interface_mismatch", "design_conflict", "plan_decision_conflict", "plan_changed", "repository_changed", "legacy"]),
   relatedWorkIntentId: Text.optional(),
   subject: Text.optional(),
   message: Text,
@@ -36,6 +36,7 @@ export const WorkProposalSchema = z.object({
   scope: z.array(Text).min(1),
   assumptions: TextList.default([]),
   interfaces: z.array(z.object({ name: Text, proposal: Text })).default([]),
+  designChoices: z.array(z.object({ name: Text, proposal: Text })).default([]),
   dependencies: TextList.default([]),
   acceptance: z.array(Text).min(1),
   baseCommit: Text.optional(),

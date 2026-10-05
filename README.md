@@ -17,7 +17,7 @@ Gitandem makes the plan part of the shared project state. Before implementation,
 
 Gitandem compares declared scopes and interfaces. A clear intent can be reviewed and authorized. A detected collision is held for a human decision. Authorization is bound to the current plan revision; changing the plan revokes active grants and requires realignment.
 
-This is coordination policy, not an AI judge. The current prototype detects explicit structured collisions. It does not infer which design is correct or silently expose one agent's private reasoning to another. A project owner resolves choices using the project plan and the context each contributor is allowed to see.
+The current prototype detects explicit structured collisions and can optionally ask Cloudflare Workers AI's Clef Flash model to compare a proposal with the approved plan and other active proposals. The model returns scored advice, not a decision. Gitandem does not let AI change the plan, clear a conflict, grant execution access, or accept code. Owners remain responsible for decisions. Only the shared plan and submitted proposals are sent for assessment; hidden agent reasoning is not collected.
 
 ## Current scope
 
@@ -30,7 +30,8 @@ Implemented:
 - Issue a short-lived, repository-scoped Git token for clone and push setup
 - Maintain versioned shared plans and decisions
 - Submit work intents through the web UI, REST API, or MCP
-- Detect exact scope overlap and conflicting proposals for a named interface
+- Detect exact scope overlap, conflicting proposals for named interfaces, and differences in named design choices or shared plan decisions
+- Assess a proposal's fit with the shared plan and compare active proposals using direct Workers AI inference (no AI Gateway); show model scores as advice only
 - Hold conflicting work for resolution and review conflict-free work before authorization
 - Bind grants to a plan revision and revoke them when that plan changes
 - Store project state in one SQLite-backed Durable Object per project
@@ -65,7 +66,7 @@ pnpm dev
 
 Open the local URL shown by Vite and enter the token from `apps/web/.dev.vars`. The local token is a development guard, not production authentication. Do not commit that file.
 
-Local mode keeps Worker execution on your machine and lets you create plan-only projects and exercise the coordination routes. Repository create/import and Git tokens are intentionally disabled locally. They call Cloudflare Artifacts, which requires an eligible Workers Paid account. This avoids making every `pnpm dev` startup depend on a paid remote preview or accidentally sending local work to a remote repository.
+Local mode keeps Worker execution on your machine and lets you create plan-only projects and exercise the coordination routes. Clicking **Assess plan with AI** sends the approved plan and selected active proposals to the configured Cloudflare Workers AI model through a remote binding. It does not use AI Gateway. This remote model call can use account credits or incur account usage. Repository create/import and Git tokens are disabled locally. Local container execution is disabled; run commands only in a deployed authorized workspace.
 
 Useful commands:
 
@@ -75,7 +76,7 @@ pnpm test
 pnpm cf-typegen
 ```
 
-`apps/web/wrangler.jsonc` declares the SQLite-backed Durable Object and Artifacts namespace binding. The binding uses the name `gitandem` and contains no account ID, deployed namespace ID, or created remote resource. Cloudflare Artifacts access requires an eligible Workers plan and a configured account. The app does not provision account resources automatically.
+`apps/web/wrangler.jsonc` declares the SQLite-backed Durable Object, Artifacts namespace, and Workers AI bindings. It contains no account ID or pre-created resource IDs. The app does not provision account resources automatically.
 
 ## API and agent access
 
@@ -93,7 +94,7 @@ See the implementation order. The project interface is a client of the coordinat
 
 The existing web application lives in `apps/web`. Future protocol packages and SDKs will live in `packages/`, so all parts of Gitandem stay in one monorepo.
 
-The v1 coordination contract is documented in [docs/protocol.md](docs/protocol.md). JSON API responses include `X-Gitandem-Contract-Version`; project snapshots include the same version as `contractVersion`.
+The v2 coordination contract is documented in [docs/protocol.md](docs/protocol.md). JSON API responses include `X-Gitandem-Contract-Version`; project snapshots include the same version as `contractVersion`.
 
 Cloudflare Workers serves the app and APIs. Each project maps to a SQLite-backed Durable Object, which is the single coordination authority for that project. Cloudflare documents Durable Objects as strongly consistent, serializable storage attached to globally named coordinators: [Durable Objects](https://developers.cloudflare.com/durable-objects/), [SQLite-backed storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/).
 
@@ -103,4 +104,4 @@ This is an early open-source project. See [CONTRIBUTING.md](CONTRIBUTING.md) for
 
 ## License
 
-No license has been selected yet. Until a license file is added, standard copyright restrictions apply. Do not assume the code is available for reuse just because the repository is public.
+This project is licensed under the MIT License; see [LICENSE](LICENSE).
