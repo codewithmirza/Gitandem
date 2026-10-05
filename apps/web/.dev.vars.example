@@ -1,3 +1,7 @@
 # Copy to .dev.vars and set different private owner and agent tokens.
 GITANDEM_API_TOKEN=replace-with-a-long-random-token
 GITANDEM_AGENT_TOKEN=replace-with-a-different-long-random-token
+GITANDEM_GITHUB_CLIENT_ID=replace-with-github-app-client-id
+GITANDEM_GITHUB_CLIENT_SECRET=store-this-as-a-local-secret
+GITANDEM_SESSION_SECRET=replace-with-at-least-32-random-characters
+GITANDEM_PUBLIC_URL=https://gitandem.example.com

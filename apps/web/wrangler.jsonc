@@ -16,11 +16,13 @@
   "durable_objects": {
     "bindings": [
       { "name": "COORDINATOR", "class_name": "ProjectCoordinator" },
-      { "name": "WORKSPACE_RUNNER", "class_name": "WorkspaceRunner" }
+      { "name": "WORKSPACE_RUNNER", "class_name": "WorkspaceRunner" },
+      { "name": "USER_DIRECTORY", "class_name": "UserDirectory" }
     ]
   },
   "migrations": [
     { "tag": "v1", "new_sqlite_classes": ["ProjectCoordinator"] },
-    { "tag": "v2", "new_sqlite_classes": ["WorkspaceRunner"] }
+    { "tag": "v2", "new_sqlite_classes": ["WorkspaceRunner"] },
+    { "tag": "v3", "new_sqlite_classes": ["UserDirectory"] }
   ]
 }

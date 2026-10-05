@@ -7,6 +7,8 @@ import "./styles.css";
 
 const TOKEN_KEY = "gitandem:api-token";
 const PROJECT_KEY = "gitandem:project";
+const DEVELOPMENT = import.meta.env.DEV;
+type User = { subject: string; login: string };
 type RepositoryAccess = { remote: string; token: string; expiresAt?: string; importedFrom?: string };
 type WorkspaceAccess = { workId: string; remote: string; defaultBranch: string; baseCommit: string };
 const lines = (text: string) => text.split("\n").map((part) => part.trim()).filter(Boolean);
@@ -15,6 +17,8 @@ const slug = (value: string) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? "");
+  const [user, setUser] = useState<User | null>(null);
+  const [authLoading, setAuthLoading] = useState(!DEVELOPMENT);
   const [projectId, setProjectId] = useState(() => localStorage.getItem(PROJECT_KEY) ?? "");
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [assessments, setAssessments] = useState<Record<string, WorkPlanAssessment>>({});
@@ -26,17 +30,34 @@ function App() {
   const [createOpen, setCreateOpen] = useState(false);
   const [workOpen, setWorkOpen] = useState(false);
 
+  useEffect(() => {
+    if (DEVELOPMENT) return;
+    let cancelled = false;
+    void fetch("/api/me", { credentials: "same-origin" })
+      .then(async (response) => {
+        if (!response.ok) return null;
+        return await response.json() as { user?: User };
+      })
+      .then((data) => { if (!cancelled) setUser(data?.user ?? null); })
+      .catch(() => { if (!cancelled) setUser(null); })
+      .finally(() => { if (!cancelled) setAuthLoading(false); });
+    return () => { cancelled = true; };
+  }, []);
+
   const request = useCallback(async (path: string, init?: RequestInit) => {
-    const response = await fetch(path, { ...init, headers: { "Content-Type": "application/json", Authorization: `Bearer ${token}`, ...init?.headers } });
+    const headers = new Headers(init?.headers);
+    headers.set("Content-Type", "application/json");
+    if (DEVELOPMENT && token) headers.set("Authorization", `Bearer ${token}`);
+    const response = await fetch(path, { ...init, credentials: "same-origin", headers });
     const data = await response.json() as { error?: string };
     if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status})`);
     return data;
   }, [token]);
   const refresh = useCallback(async () => {
-    if (!token || !projectId) return;
+    if (!(DEVELOPMENT ? token : user) || !projectId) return;
     try { setError(""); setSnapshot(await request(`/api/projects/${encodeURIComponent(projectId)}`) as ProjectSnapshot); }
     catch (e) { setSnapshot(null); setError(e instanceof Error ? e.message : "Could not load this project."); }
-  }, [projectId, request, token]);
+  }, [projectId, request, token, user]);
   useEffect(() => { void refresh(); }, [refresh]);
   const mutate = async (path: string, init: RequestInit) => {
     setBusy(true); setError("");
@@ -70,15 +91,28 @@ function App() {
   };
   const saveToken = (value: string) => { localStorage.setItem(TOKEN_KEY, value.trim()); setToken(value.trim()); };
   const chooseProject = (value: string) => { const next = slug(value); localStorage.setItem(PROJECT_KEY, next); setProjectId(next); };
+  const logout = async () => {
+    setBusy(true); setError("");
+    try {
+      const response = await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
+      if (!response.ok) throw new Error(`Sign out failed (${response.status})`);
+      setUser(null); setSnapshot(null); setProjectId(""); localStorage.removeItem(PROJECT_KEY);
+    } catch (e) { setError(e instanceof Error ? e.message : "Could not sign out."); }
+    finally { setBusy(false); }
+  };
 
-  if (!token) return <TokenGate onSave={saveToken} error={error} />;
-  if (!projectId || (!snapshot && /not found|Unauthorized/i.test(error))) return <StartPage onCreate={() => setCreateOpen(true)} onToken={() => { localStorage.removeItem(TOKEN_KEY); setToken(""); }} error={error} />;
-  if (!snapshot) return <div className="loading"><Brand /><div className="loader" /><p>{error || "Opening project…"}</p><button className="button quiet" onClick={() => void refresh()}>Try again</button><button className="text-button" onClick={() => { localStorage.removeItem(PROJECT_KEY); setProjectId(""); }}>Choose another project</button></div>;
+  if (DEVELOPMENT && !token) return <TokenGate onSave={saveToken} error={error} />;
+  if (!DEVELOPMENT && authLoading) return <div className="loading"><Brand /><div className="loader" /><p>Checking your GitHub session…</p></div>;
+  if (!DEVELOPMENT && !user) return <LoginGate error={error} />;
+  const hasSession = DEVELOPMENT ? Boolean(token) : Boolean(user);
+  if (!hasSession) return null;
+  if (!projectId || (!snapshot && /not found|Unauthorized/i.test(error))) return <StartPage onCreate={() => setCreateOpen(true)} onToken={() => { localStorage.removeItem(TOKEN_KEY); setToken(""); }} showDevToken={DEVELOPMENT} login={user?.login} onLogout={() => void logout()} error={error} />;
+  if (!snapshot) return <div className="loading"><Brand /><div className="loader" /><p>{error || "Opening project…"}</p>{!DEVELOPMENT && <div className="loading-auth"><span>Signed in as <b>{user?.login}</b></span><button className="button quiet" disabled={busy} onClick={() => void logout()}>Log out</button></div>}<button className="button quiet" onClick={() => void refresh()}>Try again</button><button className="text-button" onClick={() => { localStorage.removeItem(PROJECT_KEY); setProjectId(""); }}>Choose another project</button></div>;
 
   const active = snapshot.work.filter((item) => ["needs_resolution", "ready_for_review", "authorized", "in_progress", "submitted", "needs_alignment"].includes(item.status));
   const reviewCount = active.filter((item) => item.status === "ready_for_review" || item.status === "needs_resolution" || item.status === "needs_alignment" || item.status === "submitted").length;
   return <div className="shell">
-    <header className="topbar"><Brand /><div className="top-project"><span className="slash">/</span><span>{snapshot.project.name}</span><span className="repo-tag"><GitBranch size={13} />{snapshot.project.repository ? "Gitandem repo" : "Local plan mode"}</span></div><div className="top-actions">{snapshot.project.repository && <button className="button quiet repo-access-button" disabled={busy} onClick={() => void showRepositoryAccess()}>Git access <ArrowUpRight size={14} /></button>}<button className="icon-button" title="Refresh" onClick={() => void refresh()}><RotateCw size={16} /></button><button className="avatar" title="Change API token" onClick={() => { localStorage.removeItem(TOKEN_KEY); setToken(""); }}><LockKeyhole size={14} /></button></div></header>
+    <header className="topbar"><Brand /><div className="top-project"><span className="slash">/</span><span>{snapshot.project.name}</span><span className="repo-tag"><GitBranch size={13} />{snapshot.project.repository ? "Gitandem repo" : "Local plan mode"}</span></div><div className="top-actions">{snapshot.project.repository && <button className="button quiet repo-access-button" disabled={busy} onClick={() => void showRepositoryAccess()}>Git access <ArrowUpRight size={14} /></button>}<button className="icon-button" title="Refresh" onClick={() => void refresh()}><RotateCw size={16} /></button>{DEVELOPMENT ? <button className="avatar" title="Change API token" onClick={() => { localStorage.removeItem(TOKEN_KEY); setToken(""); }}><LockKeyhole size={14} /></button> : <><span className="signed-in-login" title={user?.login}>{user?.login}</span><button className="button quiet logout-button" disabled={busy} onClick={() => void logout()}>Log out</button></>}</div></header>
     <main className="content">
       <div className="crumb">PROJECT <span>/</span> {snapshot.project.id.toUpperCase()}</div>
       <section className="intro"><div><div className="kicker"><span className="pulse" /> SHARED PROJECT · PLAN REVISION {snapshot.project.revision}</div><h1>{view === "plan" ? "The plan comes first." : <>Give every agent<br />the <em>same direction.</em></>}</h1><p>{view === "plan" ? "This is the current agreement. Work intents are checked against it before an agent receives permission to act." : "Agents tell Gitandem what they intend to build before they start. Gitandem checks that work against the shared plan."}</p></div><div className="intro-mark"><span>G</span><i /><i /><i /></div></section>
@@ -108,8 +142,12 @@ function TokenGate({ onSave, error }: { onSave: (value: string) => void; error: 
   return <main className="gate"><div className="gate-lines" /><div className="gate-card"><Brand /><div className="kicker">A SHARED PLACE FOR AGENT WORK</div><h1>Plan together.<br /><em>Build with intent.</em></h1><p>Gitandem checks what agents plan to do against a shared project plan before they get permission to work.</p><form onSubmit={(e) => { e.preventDefault(); onSave(value); }}><label htmlFor="token">Local API token</label><div className="field-row"><input id="token" type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder="Paste your development token" autoComplete="current-password" /><button className="button primary" disabled={!value.trim()}>Connect <ArrowRight size={16} /></button></div></form><div className="gate-note"><LockKeyhole size={14} /><span>This local prototype uses a development token. Your token stays in this browser.</span></div>{error && <div className="form-error">{error}</div>}</div><div className="gate-caption">COORDINATION BEFORE EXECUTION <span>·</span> OPEN SOURCE</div></main>;
 }
 
-function StartPage({ onCreate, onToken, error }: { onCreate: () => void; onToken: () => void; error: string }) {
-  return <main className="gate"><div className="gate-lines" /><div className="gate-card start-card"><Brand /><div className="kicker">YOUR PROJECT SPACE</div><h1>Start with the<br /><em>shared plan.</em></h1><p>Create a local coordination project now. A deployed Gitandem project also creates or imports its canonical Gitandem repository.</p><button className="button primary wide" onClick={onCreate}>Create or import a project <ArrowRight size={16} /></button><div className="start-options"><div><b>Local development</b><span>Run the plan and work-intent flow without remote Cloudflare resources.</span></div><ArrowDownRight size={17} /><div><b>Deployed project</b><span>Create a repo or import a public HTTPS Git remote using Artifacts.</span></div></div><button className="text-button" onClick={onToken}>Change local token</button>{error && <div className="form-error">{error}</div>}</div><div className="gate-caption">A PROJECT HOST FOR AGENTIC WORK</div></main>;
+function LoginGate({ error }: { error: string }) {
+  return <main className="gate"><div className="gate-lines" /><div className="gate-card login-card"><Brand /><div className="kicker">A SHARED PLACE FOR AGENT WORK</div><h1>Plan together.<br /><em>Build with intent.</em></h1><p>Sign in to create a project space, agree on the plan, and coordinate work across your agents.</p><a className="button primary wide github-login" href="/auth/github/start">Continue with GitHub <ArrowRight size={16} /></a><div className="gate-note"><LockKeyhole size={14} /><span>Gitandem uses GitHub to confirm your identity. You choose when to create a project.</span></div>{error && <div className="form-error">{error}</div>}</div><div className="gate-caption">COORDINATION BEFORE EXECUTION <span>·</span> OPEN SOURCE</div></main>;
+}
+
+function StartPage({ onCreate, onToken, showDevToken, login, onLogout, error }: { onCreate: () => void; onToken: () => void; showDevToken: boolean; login?: string; onLogout: () => void; error: string }) {
+  return <main className="gate"><div className="gate-lines" /><div className="gate-card start-card"><Brand />{!showDevToken && <div className="start-auth"><span>Signed in as <b>{login}</b></span><button className="text-button" onClick={onLogout}>Log out</button></div>}<div className="kicker">YOUR PROJECT SPACE</div><h1>Start with the<br /><em>shared plan.</em></h1><p>Create a local coordination project now. A deployed Gitandem project also creates or imports its canonical Gitandem repository.</p><button className="button primary wide" onClick={onCreate}>Create or import a project <ArrowRight size={16} /></button><div className="start-options"><div><b>Local development</b><span>Run the plan and work-intent flow without remote Cloudflare resources.</span></div><ArrowDownRight size={17} /><div><b>Deployed project</b><span>Create a repo or import a public HTTPS Git remote using Artifacts.</span></div></div>{showDevToken && <button className="text-button" onClick={onToken}>Change local token</button>}{error && <div className="form-error">{error}</div>}</div><div className="gate-caption">A PROJECT HOST FOR AGENTIC WORK</div></main>;
 }
 
 function ProjectDialog({ busy, onClose, onSubmit }: { busy: boolean; onClose: () => void; onSubmit: (input: { id: string; name: string; goal: string; constraints: string[]; repositoryMode: "create" | "import"; sourceUrl?: string; sourceBranch?: string }) => void }) {
@@ -118,10 +156,8 @@ function ProjectDialog({ busy, onClose, onSubmit }: { busy: boolean; onClose: ()
 }
 
 function RepositoryAccessDialog({ access, onClose }: { access: RepositoryAccess; onClose: () => void }) {
-  const remoteCommand = access.importedFrom
-    ? `git remote add gitandem ${access.remote}\ngit -c http.extraHeader="Authorization: Bearer ${access.token}" fetch gitandem`
-    : `git remote add gitandem ${access.remote}\ngit -c http.extraHeader="Authorization: Bearer ${access.token}" push -u gitandem HEAD:main`;
-  return <Dialog title="Connect your Git client" subtitle="This write token is short-lived and can push only to this repository. Keep it private." onClose={onClose}><div className="repo-info"><span className="label">GIT REMOTE</span><code>{access.remote}</code>{access.importedFrom && <p>Imported from <a href={access.importedFrom} target="_blank" rel="noreferrer">{access.importedFrom}</a></p>}</div><div className="token-panel"><span className="label">TEMPORARY WRITE TOKEN · EXPIRES IN 15 MINUTES</span><code>{access.token}</code></div><div className="command-panel"><div><span className="label">CONNECT A LOCAL FOLDER</span><button className="text-button" onClick={() => void navigator.clipboard.writeText(remoteCommand)}>Copy commands</button></div><pre>{remoteCommand}</pre></div><div className="dialog-footnote">The token is shown only for this session. You can issue another from Git access when needed.</div><div className="dialog-actions"><button className="button primary" onClick={onClose}>Done <Check size={15} /></button></div></Dialog>;
+  const remoteCommand = `git remote add gitandem ${access.remote}\ngit -c http.extraHeader="Authorization: Bearer ${access.token}" fetch gitandem`;
+  return <Dialog title="Read the project repository" subtitle="This short-lived token can fetch the repository. Git writes go through an approved Gitandem work result." onClose={onClose}><div className="repo-info"><span className="label">GIT REMOTE</span><code>{access.remote}</code>{access.importedFrom && <p>Imported from <a href={access.importedFrom} target="_blank" rel="noreferrer">{access.importedFrom}</a></p>}</div><div className="token-panel"><span className="label">TEMPORARY READ TOKEN · EXPIRES IN 15 MINUTES</span><code>{access.token}</code></div><div className="command-panel"><div><span className="label">FETCH FROM A LOCAL FOLDER</span><button className="text-button" onClick={() => void navigator.clipboard.writeText(remoteCommand)}>Copy commands</button></div><pre>{remoteCommand}</pre></div><div className="dialog-footnote">This credential only reads the canonical repository. Agents push to isolated task repositories; accepted results are fast-forwarded through Gitandem.</div><div className="dialog-actions"><button className="button primary" onClick={onClose}>Done <Check size={15} /></button></div></Dialog>;
 }
 
 function WorkspaceAccessDialog({ access, onClose }: { access: WorkspaceAccess; onClose: () => void }) {

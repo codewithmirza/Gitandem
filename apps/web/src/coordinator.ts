@@ -13,6 +13,10 @@ const createCredentialToken = () => {
   return `gta_${btoa(binary).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "")}`;
 };
 
+export type ProjectMemberRole = "owner" | "editor" | "viewer";
+export type ProjectIdentity = { subject: string; login: string };
+export type ProjectMember = ProjectIdentity & { role: ProjectMemberRole; createdAt: string };
+
 export class ProjectCoordinator extends DurableObject<Env> {
   private readonly ready: Promise<void>;
 
@@ -21,6 +25,7 @@ export class ProjectCoordinator extends DurableObject<Env> {
     this.ready = ctx.blockConcurrencyWhile(async () => {
       const sql = ctx.storage.sql;
       sql.exec("CREATE TABLE IF NOT EXISTS project (id TEXT PRIMARY KEY, name TEXT NOT NULL, repository TEXT, revision INTEGER NOT NULL, updated_at TEXT NOT NULL)");
+      sql.exec("CREATE TABLE IF NOT EXISTS project_members (subject TEXT PRIMARY KEY, login TEXT NOT NULL, role TEXT NOT NULL CHECK (role IN ('owner', 'editor', 'viewer')), created_at TEXT NOT NULL)");
       sql.exec("CREATE TABLE IF NOT EXISTS plan (id INTEGER PRIMARY KEY CHECK (id = 1), body TEXT NOT NULL)");
       sql.exec("CREATE TABLE IF NOT EXISTS work_intents (id TEXT PRIMARY KEY, agent TEXT NOT NULL, details TEXT NOT NULL, status TEXT NOT NULL, reasons TEXT NOT NULL, plan_revision INTEGER NOT NULL, base_commit TEXT, created_at TEXT NOT NULL)");
       sql.exec("CREATE TABLE IF NOT EXISTS grants (id TEXT PRIMARY KEY, work_id TEXT NOT NULL, agent TEXT NOT NULL, plan_revision INTEGER NOT NULL, base_commit TEXT, status TEXT NOT NULL, created_at TEXT NOT NULL)");
@@ -37,10 +42,51 @@ export class ProjectCoordinator extends DurableObject<Env> {
     return new CoordinationService(new SqliteCoordinationStore(this.ctx.storage.sql));
   }
 
-  async createProject(input: CreateProjectInput) { return (await this.service()).createProject(input); }
+  async createProject(input: CreateProjectInput, owner?: ProjectIdentity) {
+    const snapshot = (await this.service()).createProject(input);
+    if (owner) this.ctx.storage.sql.exec("INSERT INTO project_members (subject, login, role, created_at) VALUES (?, ?, 'owner', ?)", owner.subject, owner.login, new Date().toISOString());
+    return snapshot;
+  }
   async getSnapshot() { return (await this.service()).getSnapshot(); }
-  async createAgentCredential(name: string) {
+  async getSnapshotFor(subject: string) {
+    const service = await this.service();
+    this.requireRole(subject, "viewer");
+    return service.getSnapshot();
+  }
+  async getMemberRole(subject: string): Promise<ProjectMemberRole | null> {
     await this.service();
+    return this.ctx.storage.sql.exec<{ role: ProjectMemberRole }>("SELECT role FROM project_members WHERE subject = ?", subject).toArray()[0]?.role ?? null;
+  }
+  async listMembers(actor: string): Promise<ProjectMember[]> {
+    await this.service();
+    this.requireRole(actor, "viewer");
+    return this.ctx.storage.sql.exec<{ subject: string; login: string; role: ProjectMemberRole; created_at: string }>("SELECT subject, login, role, created_at FROM project_members ORDER BY CASE role WHEN 'owner' THEN 0 WHEN 'editor' THEN 1 ELSE 2 END, login COLLATE NOCASE").toArray().map(({ subject, login, role, created_at }) => ({ subject, login, role, createdAt: created_at }));
+  }
+  async addMember(actor: string, member: ProjectIdentity, role: Exclude<ProjectMemberRole, "owner">): Promise<ProjectMember> {
+    await this.service();
+    this.requireRole(actor, "owner");
+    if (!member.subject.startsWith("github:") || !member.login.trim() || member.login.length > 120) throw new Error("The GitHub member identity is invalid.");
+    const current = this.ctx.storage.sql.exec<{ role: ProjectMemberRole; created_at: string }>("SELECT role, created_at FROM project_members WHERE subject = ?", member.subject).toArray()[0];
+    if (current?.role === "owner") throw new Error("The project owner cannot be changed through member invitations.");
+    const createdAt = current?.created_at ?? new Date().toISOString();
+    this.ctx.storage.sql.exec("INSERT INTO project_members (subject, login, role, created_at) VALUES (?, ?, ?, ?) ON CONFLICT(subject) DO UPDATE SET login = excluded.login, role = excluded.role", member.subject, member.login.trim(), role, createdAt);
+    return { ...member, login: member.login.trim(), role, createdAt };
+  }
+  async removeMember(actor: string, subject: string): Promise<boolean> {
+    await this.service();
+    this.requireRole(actor, "owner");
+    const result = this.ctx.storage.sql.exec<{ subject: string }>("DELETE FROM project_members WHERE subject = ? AND role != 'owner' RETURNING subject", subject).toArray();
+    return result.length > 0;
+  }
+  private requireRole(subject: string, minimum: ProjectMemberRole) {
+    const role = this.ctx.storage.sql.exec<{ role: ProjectMemberRole }>("SELECT role FROM project_members WHERE subject = ?", subject).toArray()[0]?.role;
+    const allowed = minimum === "viewer" ? ["owner", "editor", "viewer"] : minimum === "editor" ? ["owner", "editor"] : ["owner"];
+    if (!role || !allowed.includes(role)) throw new Error("You are not a member with permission to do this in this project.");
+    return role;
+  }
+  async createAgentCredential(name: string, actorSubject?: string) {
+    await this.service();
+    if (actorSubject) this.requireRole(actorSubject, "owner");
     const cleanName = name.trim();
     if (!cleanName || cleanName.length > 120) throw new Error("Agent name must be between 1 and 120 characters.");
     const id = crypto.randomUUID();
@@ -55,8 +101,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
     );
     return { id, name: cleanName, token, createdAt };
   }
-  async listAgentCredentials() {
+  async listAgentCredentials(actorSubject?: string) {
     await this.service();
+    if (actorSubject) this.requireRole(actorSubject, "owner");
     return this.ctx.storage.sql.exec<{ id: string; name: string; created_at: string; revoked_at: string | null }>(
       "SELECT id, name, created_at, revoked_at FROM agent_credentials ORDER BY created_at DESC",
     ).toArray().map(({ id, name, created_at, revoked_at }) => ({ id, name, createdAt: created_at, revokedAt: revoked_at }));
@@ -69,8 +116,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
       await credentialHash(token),
     ).toArray()[0] ?? null;
   }
-  async revokeAgentCredential(id: string) {
+  async revokeAgentCredential(id: string, actorSubject?: string) {
     await this.service();
+    if (actorSubject) this.requireRole(actorSubject, "owner");
     const changed = this.ctx.storage.sql.exec<{ id: string }>(
       "UPDATE agent_credentials SET revoked_at = ? WHERE id = ? AND revoked_at IS NULL RETURNING id",
       new Date().toISOString(),
@@ -78,8 +126,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
     ).toArray();
     return changed.length > 0;
   }
-  async updatePlan(input: UpdateProjectPlanInput) {
+  async updatePlan(input: UpdateProjectPlanInput, actorSubject?: string) {
     const service = await this.service();
+    if (actorSubject) this.requireRole(actorSubject, "owner");
     const lock = this.ctx.storage.sql.exec<{ work_id: string }>("SELECT work_id FROM acceptance_locks WHERE created_at > ? LIMIT 1", new Date(Date.now() - 5 * 60_000).toISOString()).toArray()[0];
     if (lock) throw new Error("A result is being accepted. Try the plan update again in a few minutes.");
     this.ctx.storage.sql.exec("DELETE FROM acceptance_locks");
@@ -93,13 +142,16 @@ export class ProjectCoordinator extends DurableObject<Env> {
     return { snapshot, workspaceTokens };
   }
   async submitWork(input: SubmitWorkInput) { return (await this.service()).submitWork(input); }
-  async resolveWork(id: string, input: ResolveWorkInput) {
+  async resolveWork(id: string, input: ResolveWorkInput, actorSubject?: string) {
+    await this.service();
+    if (actorSubject) this.requireRole(actorSubject, "owner");
     const lock = this.ctx.storage.sql.exec<{ work_id: string }>("SELECT work_id FROM acceptance_locks WHERE work_id = ? AND created_at > ?", id, new Date(Date.now() - 5 * 60_000).toISOString()).toArray()[0];
     if (lock) throw new Error("This result is being accepted. Try again after acceptance finishes.");
     return (await this.service()).resolveWork(id, input);
   }
-  async rejectWork(id: string, actor: string) {
+  async rejectWork(id: string, actor: string, actorSubject?: string) {
     const service = await this.service();
+    if (actorSubject) this.requireRole(actorSubject, "owner");
     const before = service.getSnapshot();
     const grant = before.grants.find((item) => item.workId === id && item.status === "active");
     const tokens = grant
@@ -118,8 +170,9 @@ export class ProjectCoordinator extends DurableObject<Env> {
     if (lock) throw new Error("This result is already being accepted.");
     return (await this.service()).submitResult(id, input);
   }
-  async prepareAcceptance(id: string, expectedRevision: number, resultCommit: string) {
+  async prepareAcceptance(id: string, expectedRevision: number, resultCommit: string, actorSubject?: string) {
     const snapshot = await (await this.service()).getSnapshot();
+    if (actorSubject) this.requireRole(actorSubject, "owner");
     const intent = snapshot.work.find((item) => item.id === id);
     if (!intent || intent.status !== "submitted" || intent.result?.commit !== resultCommit) throw new Error("The submitted result changed before acceptance.");
     if (snapshot.project.revision !== expectedRevision || intent.planRevision !== expectedRevision) throw new Error("The project plan changed before acceptance.");
