@@ -19,7 +19,6 @@ import { CommitReview4D } from "./components/CommitReview4D/CommitReview4D";
 import { PlanView } from "./components/PlanView/PlanView";
 import { EventTicker } from "./components/MissionControl/EventTicker";
 import { LoginGate } from "./components/Onboarding/LoginGate";
-import { StartPage } from "./components/Onboarding/StartPage";
 import { AgentAccessDialog } from "./components/Dialogs/AgentAccessDialog";
 import { RepositoryAccessDialog } from "./components/Dialogs/RepositoryAccessDialog";
 import { WorkspaceAccessDialog } from "./components/Dialogs/WorkspaceAccessDialog";
@@ -37,7 +36,7 @@ function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [user, setUser] = useState<User | null>(null);
   const [authLoading, setAuthLoading] = useState(true);
-  const [projectId, setProjectId] = useState(() => localStorage.getItem(PROJECT_KEY) ?? "");
+  const [projectId, setProjectId] = useState(() => localStorage.getItem(PROJECT_KEY) || "workspace-1");
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [assessments, setAssessments] = useState<Record<string, WorkPlanAssessment>>({});
   const [repoAccess, setRepoAccess] = useState<RepositoryAccess | null>(null);
@@ -95,14 +94,40 @@ function App() {
   );
 
   const refresh = useCallback(async () => {
-    if (!(DEVELOPMENT ? token : user) || !projectId) return;
+    const activeUser = DEVELOPMENT ? Boolean(token) : Boolean(user);
+    if (!activeUser) return;
+    const currentId = projectId || "workspace-1";
     try {
       setError("");
-      const snap = (await request(`/api/projects/${encodeURIComponent(projectId)}`)) as ProjectSnapshot;
-      setSnapshot(snap);
+      // Check user's projects first
+      const listRes = await request("/api/projects").catch(() => null) as { projects?: Array<{ id: string; name: string }> } | null;
+      let targetId = currentId;
+      if (listRes?.projects && listRes.projects.length > 0 && !localStorage.getItem(PROJECT_KEY)) {
+        targetId = listRes.projects[0]!.id;
+        chooseProject(targetId);
+      }
+      try {
+        const snap = (await request(`/api/projects/${encodeURIComponent(targetId)}`)) as ProjectSnapshot;
+        setSnapshot(snap);
+        if (targetId !== projectId) setProjectId(targetId);
+      } catch (err) {
+        // If workspace doesn't exist yet, automatically initialize it with zero friction
+        const createRes = (await request("/api/projects", {
+          method: "POST",
+          body: JSON.stringify({
+            id: targetId,
+            name: "Workspace 1",
+            goal: "Collaborative agentic workspace",
+            constraints: [],
+            repositoryMode: "create",
+          }),
+        })) as { snapshot: ProjectSnapshot; repositoryAccess: RepositoryAccess | null };
+        chooseProject(targetId);
+        setSnapshot(createRes.snapshot);
+        setRepoAccess(createRes.repositoryAccess);
+      }
     } catch (e) {
-      setSnapshot(null);
-      setError(e instanceof Error ? e.message : "Could not load this project.");
+      setError(e instanceof Error ? e.message : "Could not load workspace.");
     }
   }, [projectId, request, token, user]);
 
@@ -225,67 +250,14 @@ function App() {
     return <LoginGate error={error} onUseDevToken={() => { localStorage.setItem(TOKEN_KEY, "dev-token"); setToken("dev-token"); }} isDev={DEVELOPMENT} />;
   }
 
-  if (!projectId || (!snapshot && /not found|Unauthorized/i.test(error))) {
+  // If project is still loading, show loading spinner
+  if (!snapshot) {
     return (
-      <>
-        <StartPage
-          login={user?.login}
-          showDevToken={Boolean(token && !user)}
-          onLogout={() => void logout()}
-          onToken={() => { localStorage.removeItem(TOKEN_KEY); setToken(""); }}
-          onCreate={() => setCreateOpen(true)}
-          busy={busy}
-          error={error}
-          onDirectSubmit={async (repoName, goalText) => {
-            setBusy(true);
-            setError("");
-            const idCand = repoName.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 63) || `repo-${Date.now().toString(36)}`;
-            try {
-              const res = (await request("/api/projects", {
-                method: "POST",
-                body: JSON.stringify({
-                  id: idCand,
-                  name: repoName,
-                  goal: goalText,
-                  constraints: [],
-                  repositoryMode: "create",
-                }),
-              })) as { snapshot: ProjectSnapshot; repositoryAccess: RepositoryAccess | null };
-              chooseProject(idCand);
-              setSnapshot(res.snapshot);
-              setRepoAccess(res.repositoryAccess);
-            } catch (e) {
-              setError(e instanceof Error ? e.message : "Could not create repository.");
-            } finally {
-              setBusy(false);
-            }
-          }}
-        />
-        {createOpen && (
-          <ProjectDialog
-            busy={busy}
-            onClose={() => setCreateOpen(false)}
-            onSubmit={async (input) => {
-              setBusy(true);
-              setError("");
-              try {
-                const res = (await request("/api/projects", { method: "POST", body: JSON.stringify(input) })) as {
-                  snapshot: ProjectSnapshot;
-                  repositoryAccess: RepositoryAccess | null;
-                };
-                chooseProject(input.id);
-                setSnapshot(res.snapshot);
-                setRepoAccess(res.repositoryAccess);
-                setCreateOpen(false);
-              } catch (e) {
-                setError(e instanceof Error ? e.message : "Could not create project.");
-              } finally {
-                setBusy(false);
-              }
-            }}
-          />
-        )}
-      </>
+      <div className="loading">
+        <Brand />
+        <div className="loader" />
+        <p>Connecting to Mission Control Cockpit…</p>
+      </div>
     );
   }
 
@@ -318,6 +290,7 @@ function App() {
         onRefresh={() => void refresh()}
         onLogout={() => void logout()}
         onSwitchProject={() => { localStorage.removeItem(PROJECT_KEY); setSnapshot(null); setProjectId(""); }}
+        onCreateProject={() => setCreateOpen(true)}
         busy={busy}
         isDev={DEVELOPMENT}
       />

@@ -1,4 +1,4 @@
-import { GitBranch, ChevronDown, Search, Terminal, RotateCw, LockKeyhole, Users, Bot } from "lucide-react";
+import { GitBranch, ChevronDown, Search, Terminal, RotateCw, LockKeyhole, Users, Bot, Plus } from "lucide-react";
 import { Brand } from "../common/Brand";
 import { StatusChip } from "../common/StatusChip";
 import type { User, ProjectSnapshot } from "../../types";
@@ -12,6 +12,7 @@ interface ProjectBarProps {
   onRefresh: () => void;
   onLogout: () => void;
   onSwitchProject: () => void;
+  onCreateProject?: () => void;
   busy: boolean;
   isDev: boolean;
 }
@@ -25,6 +26,7 @@ export function ProjectBar({
   onRefresh,
   onLogout,
   onSwitchProject,
+  onCreateProject,
   busy,
   isDev,
 }: ProjectBarProps) {
@@ -66,6 +68,18 @@ export function ProjectBar({
         </span>
         <ChevronDown size={14} color="var(--text-secondary)" />
       </button>
+
+      {onCreateProject && (
+        <button
+          type="button"
+          className="button quiet small"
+          onClick={onCreateProject}
+          title="Create or import new repository"
+          style={{ padding: "4px 8px", fontSize: "11px", gap: "4px" }}
+        >
+          <Plus size={13} /> New
+        </button>
+      )}
 
       <span
         style={{
