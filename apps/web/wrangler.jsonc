@@ -12,6 +12,7 @@
     "traces": { "enabled": true }
   },
   "artifacts": [{ "binding": "ARTIFACTS", "namespace": "gitandem" }],
+  "d1_databases": [{ "binding": "GITANDEM_D1", "database_name": "gitandem-db", "database_id": "REPLACE_WITH_ACTUAL_D1_ID_AFTER_CREATION" }],
   "containers": [{ "class_name": "WorkspaceRunner", "scheduling_policy": "durable_object" }],
   "durable_objects": {
     "bindings": [

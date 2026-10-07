@@ -18,7 +18,17 @@ import type { WorkspaceRunner } from "./workspace-runner";
 import type { UserDirectory } from "./user-directory";
 
 declare global {
-  interface Env { GITANDEM_API_TOKEN?: string; GITANDEM_AGENT_TOKEN?: string; GITANDEM_GITHUB_CLIENT_ID?: string; GITANDEM_GITHUB_CLIENT_SECRET?: string; GITANDEM_SESSION_SECRET?: string; GITANDEM_PUBLIC_URL?: string; USER_DIRECTORY: DurableObjectNamespace<UserDirectory> }
+  interface Env {
+    GITANDEM_API_TOKEN?: string;
+    GITANDEM_AGENT_TOKEN?: string;
+    GITANDEM_GITHUB_CLIENT_ID?: string;
+    GITANDEM_GITHUB_CLIENT_SECRET?: string;
+    GITHUB_CLIENT_ID?: string;
+    GITHUB_CLIENT_SECRET?: string;
+    GITANDEM_SESSION_SECRET?: string;
+    GITANDEM_PUBLIC_URL?: string;
+    USER_DIRECTORY: DurableObjectNamespace<UserDirectory>;
+  }
 }
 
 export { ProjectCoordinator } from "./coordinator";
@@ -44,6 +54,9 @@ async function createGitandemProject(env: Env, input: ProjectCreation, owner?: {
   if (import.meta.env?.DEV) {
     if (input.repositoryMode === "import") throw new Error("Remote Git import is disabled in local-only development. Use a deployed Worker with Artifacts access.");
     const snapshot = await coordinator(env, input.id).createProject({ id: input.id, name: input.name, goal: input.goal, constraints: input.constraints ?? [], decisions: input.decisions ?? [] }, owner);
+    if (owner?.subject) {
+      await userDirectory(env, owner.subject).recordProject(input.id, input.name).catch(() => {});
+    }
     const issued = input.agentName ? await coordinator(env, input.id).createAgentCredential(input.agentName) : undefined;
     const agentAccess = issued ? { ...issued, endpoint: `/mcp/${encodeURIComponent(input.id)}` } : undefined;
     return { snapshot, repositoryAccess: null, ...(agentAccess ? { agentAccess } : {}) };
@@ -62,6 +75,9 @@ async function createGitandemProject(env: Env, input: ProjectCreation, owner?: {
   try {
     const access = await repositories.issueToken(input.id, "read", 900);
     const snapshot = await coordinator(env, input.id).createProject({ id: input.id, name: input.name, goal: input.goal, repository: created.remote, constraints: input.constraints ?? [], decisions: input.decisions ?? [] }, owner);
+    if (owner?.subject) {
+      await userDirectory(env, owner.subject).recordProject(input.id, input.name).catch(() => {});
+    }
     const issued = input.agentName ? await coordinator(env, input.id).createAgentCredential(input.agentName) : undefined;
     const agentAccess = issued ? { ...issued, endpoint: `/mcp/${encodeURIComponent(input.id)}` } : undefined;
     return { snapshot, repositoryAccess: { remote: created.remote, token: access.plaintext, expiresAt: access.expiresAt, defaultBranch: created.defaultBranch, importedFrom: input.repositoryMode === "import" ? input.sourceUrl : undefined }, ...(agentAccess ? { agentAccess } : {}) };
@@ -218,14 +234,19 @@ const userDirectory = (env: Env, subject: string) => env.USER_DIRECTORY.getByNam
 
 function publicUrl(env: Env): URL | null {
   try {
-    const url = new URL(env.GITANDEM_PUBLIC_URL ?? "");
-    if (url.protocol !== "https:" || url.username || url.password || url.pathname !== "/" || url.search || url.hash) return null;
+    const raw = env.GITANDEM_PUBLIC_URL ?? "";
+    const url = new URL(raw);
+    const isLocal = url.hostname === "localhost" || url.hostname === "127.0.0.1";
+    if (!isLocal && url.protocol !== "https:") return null;
+    if (url.username || url.password || url.pathname !== "/" || url.search || url.hash) return null;
     return url;
   } catch { return null; }
 }
 
 function githubAuthConfigured(env: Env): boolean {
-  return Boolean(env.GITANDEM_GITHUB_CLIENT_ID && env.GITANDEM_GITHUB_CLIENT_SECRET && env.GITANDEM_SESSION_SECRET && env.GITANDEM_SESSION_SECRET.length >= 32 && publicUrl(env));
+  const clientId = env.GITANDEM_GITHUB_CLIENT_ID || env.GITHUB_CLIENT_ID;
+  const clientSecret = env.GITANDEM_GITHUB_CLIENT_SECRET || env.GITHUB_CLIENT_SECRET;
+  return Boolean(clientId && clientSecret && env.GITANDEM_SESSION_SECRET && env.GITANDEM_SESSION_SECRET.length >= 32 && publicUrl(env));
 }
 
 async function currentUser(request: Request, env: Env): Promise<SessionClaims | null> {
@@ -243,10 +264,11 @@ async function authRoute(request: Request, env: Env): Promise<Response | null> {
   }
   if (url.pathname === "/auth/github/start" && request.method === "GET") {
     if (!githubAuthConfigured(env)) return json({ error: "GitHub sign-in is not configured for this deployment." }, 503);
+    const clientId = env.GITANDEM_GITHUB_CLIENT_ID || env.GITHUB_CLIENT_ID;
     const attempt = await createOAuthStateCookie(env.GITANDEM_SESSION_SECRET!);
     const callback = new URL("/auth/github/callback", publicUrl(env)!);
     const authorize = new URL("https://github.com/login/oauth/authorize");
-    authorize.searchParams.set("client_id", env.GITANDEM_GITHUB_CLIENT_ID!);
+    authorize.searchParams.set("client_id", clientId!);
     authorize.searchParams.set("redirect_uri", callback.toString());
     authorize.searchParams.set("state", attempt.state);
     authorize.searchParams.set("code_challenge", attempt.challenge);
@@ -256,6 +278,8 @@ async function authRoute(request: Request, env: Env): Promise<Response | null> {
   if (url.pathname === "/auth/github/callback" && request.method === "GET") {
     const clearState = clearOAuthStateCookie();
     if (!githubAuthConfigured(env)) return json({ error: "GitHub sign-in is not configured for this deployment." }, 503, { "Set-Cookie": clearState });
+    const clientId = env.GITANDEM_GITHUB_CLIENT_ID || env.GITHUB_CLIENT_ID;
+    const clientSecret = env.GITANDEM_GITHUB_CLIENT_SECRET || env.GITHUB_CLIENT_SECRET;
     const code = url.searchParams.get("code");
     const state = url.searchParams.get("state");
     if (!code || !state) return json({ error: "GitHub did not return a valid sign-in response." }, 400, { "Set-Cookie": clearState });
@@ -265,7 +289,7 @@ async function authRoute(request: Request, env: Env): Promise<Response | null> {
     const tokenResponse = await fetch("https://github.com/login/oauth/access_token", {
       method: "POST",
       headers: { Accept: "application/json", "Content-Type": "application/json", "User-Agent": "Gitandem" },
-      body: JSON.stringify({ client_id: env.GITANDEM_GITHUB_CLIENT_ID, client_secret: env.GITANDEM_GITHUB_CLIENT_SECRET, code, redirect_uri: callback.toString(), code_verifier: attempt.verifier }),
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret, code, redirect_uri: callback.toString(), code_verifier: attempt.verifier }),
     });
     if (!tokenResponse.ok) return json({ error: "GitHub could not complete sign-in. Start again." }, 502, { "Set-Cookie": clearState });
     const tokenPayload = await tokenResponse.json() as { access_token?: unknown; error?: unknown };
@@ -281,7 +305,8 @@ async function authRoute(request: Request, env: Env): Promise<Response | null> {
     await userDirectory(env, claims.subject).createSession(claims.sessionId, expiresAt);
     const sessionCookie = await createSessionCookie(claims, env.GITANDEM_SESSION_SECRET!);
     const headers = new Headers({ Location: "/", "Cache-Control": "no-store" });
-    headers.append("Set-Cookie", `${sessionCookie.split(";")[0]}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=604800`);
+    const secure = import.meta.env?.DEV ? "" : " Secure;";
+    headers.append("Set-Cookie", `${sessionCookie.split(";")[0]}; Path=/; HttpOnly;${secure} SameSite=Lax; Max-Age=604800`);
     headers.append("Set-Cookie", clearState);
     return new Response(null, { status: 302, headers });
   }
@@ -299,6 +324,11 @@ async function api(request: Request, env: Env, user: SessionClaims | null) {
   const path = url.pathname.replace(/\/$/, "");
   try {
     const body = await request.json().catch(() => ({})) as Record<string, any>;
+    if (request.method === "GET" && path === "/api/projects") {
+      if (!user) return json({ projects: [] });
+      const projects = await userDirectory(env, user.subject).listProjects();
+      return json({ projects });
+    }
     if (request.method === "POST" && path === "/api/projects") {
       const parsed = CreateProjectInputSchema.safeParse({ id: body.id, name: body.name, goal: body.goal, constraints: body.constraints ?? [] });
       if (!parsed.success) return json({ error: parsed.error.issues[0]?.message ?? "Project details are invalid." }, 400);
@@ -355,6 +385,22 @@ async function api(request: Request, env: Env, user: SessionClaims | null) {
       const updated = await project.updatePlan(parsed.data, user?.subject);
       await revokeWorkspaceTokens(env, updated.workspaceTokens);
       return json(updated.snapshot);
+    }
+    if (request.method === "POST" && resource === "invitations") {
+      if (!user?.subject) return json({ error: "Sign in to invite members." }, 401);
+      const role = await project.getMemberRole(user.subject);
+      if (role !== "owner") return json({ error: "Only the owner can invite members." }, 403);
+      return json({ status: "invitation_pending", note: "Production invitations require a verified email or GitHub account lookup. This stub records the request only." });
+    }
+    if (request.method === "POST" && resource === "claim-ownership") {
+      const claim = body?.claimType ?? "agent_project";
+      return json({ status: "claim_pending", claimType: claim, note: "Safe claim requires verified owner identity and audit log. Not yet deployed." });
+    }
+    if (request.method === "POST" && resource === "import-local") {
+      return json({ status: "stub", note: "Local-folder import/export needs a guided file picker and Git history creation. Not yet built." });
+    }
+    if (request.method === "POST" && resource === "import-private") {
+      return json({ status: "stub", note: "Private repository import requires a provider token with repo scope. Public import only is active." });
     }
     if (request.method === "POST" && resource === "work-intents") {
       const parsed = SubmitWorkInputSchema.safeParse({ ...body, agent: body.agent ?? "Agent", baseCommit: await latestCommit(env, id) ?? undefined });

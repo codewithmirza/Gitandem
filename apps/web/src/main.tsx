@@ -1,208 +1,539 @@
 import { useCallback, useEffect, useState } from "react";
 import { createRoot } from "react-dom/client";
-import { ArrowDownRight, ArrowRight, ArrowUpRight, Check, CircleAlert, Command, GitBranch, Layers2, LockKeyhole, Plus, RotateCw, Shield, Sparkles, X } from "lucide-react";
-import type { ProjectPlan, ProjectSnapshot, WorkGrant, WorkIntent } from "@gitandem/core";
-import type { WorkPlanAssessment } from "./plan-assessment";
+import { CircleAlert, X } from "lucide-react";
+import type {
+  User,
+  ProjectSnapshot,
+  WorkIntent,
+  RepositoryAccess,
+  AgentAccess,
+  WorkspaceAccess,
+  WorkPlanAssessment,
+} from "./types";
+
+import { ProjectBar } from "./components/ProjectBar/ProjectBar";
+import { NavigationRail, type NavSection } from "./components/NavigationRail/NavigationRail";
+import { MissionControl } from "./components/MissionControl/MissionControl";
+import { DecisionLens } from "./components/DecisionLens/DecisionLens";
+import { CommitReview4D } from "./components/CommitReview4D/CommitReview4D";
+import { PlanView } from "./components/PlanView/PlanView";
+import { EventTicker } from "./components/MissionControl/EventTicker";
+import { LoginGate } from "./components/Onboarding/LoginGate";
+import { StartPage } from "./components/Onboarding/StartPage";
+import { AgentAccessDialog } from "./components/Dialogs/AgentAccessDialog";
+import { RepositoryAccessDialog } from "./components/Dialogs/RepositoryAccessDialog";
+import { WorkspaceAccessDialog } from "./components/Dialogs/WorkspaceAccessDialog";
+import { ProjectDialog } from "./components/Dialogs/ProjectDialog";
+import { WorkDialog } from "./components/Dialogs/WorkDialog";
+import { Brand } from "./components/common/Brand";
+
 import "./styles.css";
 
 const TOKEN_KEY = "gitandem:api-token";
 const PROJECT_KEY = "gitandem:project";
 const DEVELOPMENT = import.meta.env.DEV;
-type User = { subject: string; login: string };
-type RepositoryAccess = { remote: string; token: string; expiresAt?: string; importedFrom?: string };
-type WorkspaceAccess = { workId: string; remote: string; defaultBranch: string; baseCommit: string };
-const lines = (text: string) => text.split("\n").map((part) => part.trim()).filter(Boolean);
-const parsePairs = (text: string) => lines(text).map((line) => { const at = line.indexOf(":"); return at < 0 ? { name: line, value: "" } : { name: line.slice(0, at).trim(), value: line.slice(at + 1).trim() }; }).filter((item) => item.name && item.value);
-const slug = (value: string) => value.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 63);
 
 function App() {
   const [token, setToken] = useState(() => localStorage.getItem(TOKEN_KEY) ?? "");
   const [user, setUser] = useState<User | null>(null);
-  const [authLoading, setAuthLoading] = useState(!DEVELOPMENT);
+  const [authLoading, setAuthLoading] = useState(true);
   const [projectId, setProjectId] = useState(() => localStorage.getItem(PROJECT_KEY) ?? "");
   const [snapshot, setSnapshot] = useState<ProjectSnapshot | null>(null);
   const [assessments, setAssessments] = useState<Record<string, WorkPlanAssessment>>({});
   const [repoAccess, setRepoAccess] = useState<RepositoryAccess | null>(null);
+  const [agentAccess, setAgentAccess] = useState<AgentAccess | null>(null);
   const [workspaceAccess, setWorkspaceAccess] = useState<WorkspaceAccess | null>(null);
   const [error, setError] = useState("");
   const [busy, setBusy] = useState(false);
-  const [view, setView] = useState<"project" | "plan">("project");
+
+  // Navigation & view state
+  const [actorMode, setActorMode] = useState<"human" | "agent">("human");
+  const [activeSection, setActiveSection] = useState<NavSection>("cockpit");
+    const [decisionIntent, setDecisionIntent] = useState<WorkIntent | null>(null);
+  const [reviewIntent, setReviewIntent] = useState<WorkIntent | null>(null);
+
+  // Dialogs
   const [createOpen, setCreateOpen] = useState(false);
   const [workOpen, setWorkOpen] = useState(false);
 
+  // Active mock connections
+  const connectedAgents = [
+    { name: "Claude Code (Sonnet 3.5)", lastSeen: "2s ago" },
+    { name: "Cursor Composer", lastSeen: "8s ago" },
+    { name: "Codex CLI", lastSeen: "14s ago" },
+  ];
+
   useEffect(() => {
-    if (DEVELOPMENT) return;
     let cancelled = false;
     void fetch("/api/me", { credentials: "same-origin" })
-      .then(async (response) => {
-        if (!response.ok) return null;
-        return await response.json() as { user?: User };
+      .then(async (res) => (res.ok ? ((await res.json()) as { user?: User }) : null))
+      .then((data) => {
+        if (!cancelled) setUser(data?.user ?? null);
       })
-      .then((data) => { if (!cancelled) setUser(data?.user ?? null); })
-      .catch(() => { if (!cancelled) setUser(null); })
-      .finally(() => { if (!cancelled) setAuthLoading(false); });
-    return () => { cancelled = true; };
+      .catch(() => {
+        if (!cancelled) setUser(null);
+      })
+      .finally(() => {
+        if (!cancelled) setAuthLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
   }, []);
 
-  const request = useCallback(async (path: string, init?: RequestInit) => {
-    const headers = new Headers(init?.headers);
-    headers.set("Content-Type", "application/json");
-    if (DEVELOPMENT && token) headers.set("Authorization", `Bearer ${token}`);
-    const response = await fetch(path, { ...init, credentials: "same-origin", headers });
-    const data = await response.json() as { error?: string };
-    if (!response.ok) throw new Error(data.error ?? `Request failed (${response.status})`);
-    return data;
-  }, [token]);
+  const request = useCallback(
+    async (path: string, init?: RequestInit) => {
+      const headers = new Headers(init?.headers);
+      headers.set("Content-Type", "application/json");
+      if (DEVELOPMENT && token) headers.set("Authorization", `Bearer ${token}`);
+      const res = await fetch(path, { ...init, credentials: "same-origin", headers });
+      const data = (await res.json()) as { error?: string };
+      if (!res.ok) throw new Error(data.error ?? `Request failed (${res.status})`);
+      return data;
+    },
+    [token]
+  );
+
   const refresh = useCallback(async () => {
     if (!(DEVELOPMENT ? token : user) || !projectId) return;
-    try { setError(""); setSnapshot(await request(`/api/projects/${encodeURIComponent(projectId)}`) as ProjectSnapshot); }
-    catch (e) { setSnapshot(null); setError(e instanceof Error ? e.message : "Could not load this project."); }
+    try {
+      setError("");
+      const snap = (await request(`/api/projects/${encodeURIComponent(projectId)}`)) as ProjectSnapshot;
+      setSnapshot(snap);
+    } catch (e) {
+      setSnapshot(null);
+      setError(e instanceof Error ? e.message : "Could not load this project.");
+    }
   }, [projectId, request, token, user]);
-  useEffect(() => { void refresh(); }, [refresh]);
+
+  useEffect(() => {
+    void refresh();
+  }, [refresh]);
+
   const mutate = async (path: string, init: RequestInit) => {
-    setBusy(true); setError("");
-    try { const result = await request(path, init); if (result && typeof result === "object" && "project" in result) setSnapshot(result as ProjectSnapshot); else await refresh(); }
-    catch (e) { setError(e instanceof Error ? e.message : "The request could not be completed."); }
-    finally { setBusy(false); }
+    setBusy(true);
+    setError("");
+    try {
+      const result = await request(path, init);
+      if (result && typeof result === "object" && "project" in result) {
+        setSnapshot(result as ProjectSnapshot);
+      } else {
+        await refresh();
+      }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "The request could not be completed.");
+    } finally {
+      setBusy(false);
+    }
   };
+
   const showRepositoryAccess = async () => {
     if (!snapshot) return;
-    setBusy(true); setError("");
-    try { setRepoAccess(await request(`/api/projects/${snapshot.project.id}/repository-token`, { method: "POST" }) as RepositoryAccess); }
-    catch (e) { setError(e instanceof Error ? e.message : "Could not issue a repository token."); }
-    finally { setBusy(false); }
-  };
-  const authorizeWork = async (workId: string) => {
-    setBusy(true); setError("");
+    setBusy(true);
+    setError("");
     try {
-      const result = await request(`/api/projects/${snapshot!.project.id}/work-intents/${workId}/review`, { method: "POST", body: JSON.stringify({ actor: "Project owner" }) }) as { snapshot: ProjectSnapshot; workspaceAccess: WorkspaceAccess | null };
+      setRepoAccess((await request(`/api/projects/${snapshot.project.id}/repository-token`, { method: "POST" })) as RepositoryAccess);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not issue repository access.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const createAgentToken = async () => {
+    if (!snapshot) return;
+    setBusy(true);
+    try {
+      const res = (await request(`/api/projects/${snapshot.project.id}/agent-credentials`, {
+        method: "POST",
+        body: JSON.stringify({ agent: `agent-${Date.now().toString(36)}` }),
+      })) as AgentAccess;
+      setAgentAccess(res);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not issue agent MCP credential.");
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const authorizeWork = async (workId: string) => {
+    setBusy(true);
+    setError("");
+    try {
+      const result = (await request(`/api/projects/${snapshot!.project.id}/work-intents/${workId}/review`, {
+        method: "POST",
+        body: JSON.stringify({ actor: user?.login || "Project owner" }),
+      })) as { snapshot: ProjectSnapshot; workspaceAccess: WorkspaceAccess | null };
       setSnapshot(result.snapshot);
       setWorkspaceAccess(result.workspaceAccess);
-    } catch (e) { setError(e instanceof Error ? e.message : "Could not authorize this work."); }
-    finally { setBusy(false); }
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not authorize this work.");
+    } finally {
+      setBusy(false);
+    }
   };
+
   const assessWork = async (workId: string) => {
-    setBusy(true); setError("");
+    setBusy(true);
+    setError("");
     try {
-      const report = await request(`/api/projects/${snapshot!.project.id}/work-intents/${workId}/assessment`, { method: "POST" }) as WorkPlanAssessment;
-      setAssessments((current) => ({ ...current, [workId]: report }));
-    } catch (e) { setError(e instanceof Error ? e.message : "Could not assess this work plan."); }
-    finally { setBusy(false); }
+      const report = (await request(`/api/projects/${snapshot!.project.id}/work-intents/${workId}/assessment`, {
+        method: "POST",
+      })) as WorkPlanAssessment;
+      setAssessments((cur) => ({ ...cur, [workId]: report }));
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not assess this work plan.");
+    } finally {
+      setBusy(false);
+    }
   };
-  const saveToken = (value: string) => { localStorage.setItem(TOKEN_KEY, value.trim()); setToken(value.trim()); };
-  const chooseProject = (value: string) => { const next = slug(value); localStorage.setItem(PROJECT_KEY, next); setProjectId(next); };
+
+  const chooseProject = (val: string) => {
+    const slugVal = val.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 63);
+    localStorage.setItem(PROJECT_KEY, slugVal);
+    setProjectId(slugVal);
+  };
+
   const logout = async () => {
-    setBusy(true); setError("");
+    setBusy(true);
+    setError("");
     try {
-      const response = await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
-      if (!response.ok) throw new Error(`Sign out failed (${response.status})`);
-      setUser(null); setSnapshot(null); setProjectId(""); localStorage.removeItem(PROJECT_KEY);
-    } catch (e) { setError(e instanceof Error ? e.message : "Could not sign out."); }
-    finally { setBusy(false); }
+      const res = await fetch("/auth/logout", { method: "POST", credentials: "same-origin" });
+      if (!res.ok) throw new Error(`Sign out failed (${res.status})`);
+      setUser(null);
+      setSnapshot(null);
+      setProjectId("");
+      localStorage.removeItem(PROJECT_KEY);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : "Could not sign out.");
+    } finally {
+      setBusy(false);
+    }
   };
 
-  if (DEVELOPMENT && !token) return <TokenGate onSave={saveToken} error={error} />;
-  if (!DEVELOPMENT && authLoading) return <div className="loading"><Brand /><div className="loader" /><p>Checking your GitHub session…</p></div>;
-  if (!DEVELOPMENT && !user) return <LoginGate error={error} />;
-  const hasSession = DEVELOPMENT ? Boolean(token) : Boolean(user);
-  if (!hasSession) return null;
-  if (!projectId || (!snapshot && /not found|Unauthorized/i.test(error))) return <StartPage onCreate={() => setCreateOpen(true)} onToken={() => { localStorage.removeItem(TOKEN_KEY); setToken(""); }} showDevToken={DEVELOPMENT} login={user?.login} onLogout={() => void logout()} error={error} />;
-  if (!snapshot) return <div className="loading"><Brand /><div className="loader" /><p>{error || "Opening project…"}</p>{!DEVELOPMENT && <div className="loading-auth"><span>Signed in as <b>{user?.login}</b></span><button className="button quiet" disabled={busy} onClick={() => void logout()}>Log out</button></div>}<button className="button quiet" onClick={() => void refresh()}>Try again</button><button className="text-button" onClick={() => { localStorage.removeItem(PROJECT_KEY); setProjectId(""); }}>Choose another project</button></div>;
+  if (authLoading) {
+    return (
+      <div className="loading">
+        <Brand />
+        <div className="loader" />
+        <p>Verifying authentication session…</p>
+      </div>
+    );
+  }
 
-  const active = snapshot.work.filter((item) => ["needs_resolution", "ready_for_review", "authorized", "in_progress", "submitted", "needs_alignment"].includes(item.status));
-  const reviewCount = active.filter((item) => item.status === "ready_for_review" || item.status === "needs_resolution" || item.status === "needs_alignment" || item.status === "submitted").length;
-  return <div className="shell">
-    <header className="topbar"><Brand /><div className="top-project"><span className="slash">/</span><span>{snapshot.project.name}</span><span className="repo-tag"><GitBranch size={13} />{snapshot.project.repository ? "Gitandem repo" : "Local plan mode"}</span></div><div className="top-actions">{snapshot.project.repository && <button className="button quiet repo-access-button" disabled={busy} onClick={() => void showRepositoryAccess()}>Git access <ArrowUpRight size={14} /></button>}<button className="icon-button" title="Refresh" onClick={() => void refresh()}><RotateCw size={16} /></button>{DEVELOPMENT ? <button className="avatar" title="Change API token" onClick={() => { localStorage.removeItem(TOKEN_KEY); setToken(""); }}><LockKeyhole size={14} /></button> : <><span className="signed-in-login" title={user?.login}>{user?.login}</span><button className="button quiet logout-button" disabled={busy} onClick={() => void logout()}>Log out</button></>}</div></header>
-    <main className="content">
-      <div className="crumb">PROJECT <span>/</span> {snapshot.project.id.toUpperCase()}</div>
-      <section className="intro"><div><div className="kicker"><span className="pulse" /> SHARED PROJECT · PLAN REVISION {snapshot.project.revision}</div><h1>{view === "plan" ? "The plan comes first." : <>Give every agent<br />the <em>same direction.</em></>}</h1><p>{view === "plan" ? "This is the current agreement. Work intents are checked against it before an agent receives permission to act." : "Agents tell Gitandem what they intend to build before they start. Gitandem checks that work against the shared plan."}</p></div><div className="intro-mark"><span>G</span><i /><i /><i /></div></section>
-      {error && <div className="notice"><CircleAlert size={16} />{error}<button className="icon-button" onClick={() => setError("")}><X size={15} /></button></div>}
-      <div className="tabs"><button className={view === "project" ? "active" : ""} onClick={() => setView("project")}>Work overview <span>{active.length}</span></button><button className={view === "plan" ? "active" : ""} onClick={() => setView("plan")}>Shared plan <span>v{snapshot.project.revision}</span></button><div className="tabs-fill" /><button className="button primary" onClick={() => setWorkOpen(true)}><Plus size={16} /> Propose work</button></div>
+  if (!user && !token) {
+    return <LoginGate error={error} onUseDevToken={() => { localStorage.setItem(TOKEN_KEY, "dev-token"); setToken("dev-token"); }} isDev={DEVELOPMENT} />;
+  }
 
-      {view === "plan" ? <PlanView snapshot={snapshot} busy={busy} onSave={(plan) => void mutate(`/api/projects/${snapshot.project.id}/plan`, { method: "PUT", body: JSON.stringify({ ...plan, actor: "Project owner" }) })} /> : <>
-        <section className="plan-strip"><div className="plan-symbol"><Layers2 size={19} /></div><div className="plan-summary"><span className="label">APPROVED PROJECT GOAL</span><p>{snapshot.plan.goal}</p><span className="subtle">{snapshot.plan.constraints.length} constraints <i /> {snapshot.plan.decisions.length} shared decisions</span></div><button className="button outline" onClick={() => setView("plan")}>Open plan <ArrowUpRight size={15} /></button></section>
-        <section className="section-heading"><div><div className="kicker">BEFORE ANY CODE CHANGES</div><h2>Work intents</h2><p>Scope and interfaces are agreed here, before implementation begins.</p></div><div className="review-counter"><b>{reviewCount.toString().padStart(2, "0")}</b><span>NEED REVIEW</span></div></section>
-        {active.length ? <div className="work-list">{active.map((item) => <WorkCard key={item.id} item={item} grant={snapshot.grants.find((grant) => grant.workId === item.id && grant.status === "active")} assessment={assessments[item.id]} busy={busy} onAssess={() => void assessWork(item.id)} onAction={(action) => action === "review" ? void authorizeWork(item.id) : action === "accept" ? void mutate(`/api/projects/${snapshot.project.id}/work-intents/${item.id}/accept`, { method: "POST", body: JSON.stringify({ actor: "Project owner" }) }) : void mutate(`/api/projects/${snapshot.project.id}/work-intents/${item.id}/reject`, { method: "POST", body: JSON.stringify({ actor: "Project owner" }) })} />)}</div> : <div className="empty-state"><div className="empty-icon"><Sparkles size={19} /></div><h3>No work is underway.</h3><p>When an agent is asked to work, it should propose a plan first. Review that intent here before granting access to execution.</p><button className="button primary" onClick={() => setWorkOpen(true)}><Plus size={16} /> Create a work intent</button></div>}
-        <section className="lower-grid"><div className="subsection"><div className="subsection-head"><div><div className="kicker">TRACEABLE CHANGES</div><h3>Coordination history</h3></div><span className="label">LATEST</span></div>{snapshot.activity.length ? snapshot.activity.slice(0, 6).map((event) => <div className="activity" key={event.id}><span className="activity-mark"><Check size={12} /></span><div><b>{event.actor}</b><p>{event.detail}</p></div><time>{new Date(event.createdAt).toLocaleDateString(undefined, { month: "short", day: "numeric" })}</time></div>) : <p className="muted">New project activity will appear here.</p>}</div>
-          <aside className="principle"><div className="principle-icon"><Shield size={18} /></div><div className="kicker">AUTHORITY STAYS EXPLICIT</div><h3>A proposal is not permission.</h3><p>Gitandem only creates a scoped work grant after review. If the plan changes, active grants are revoked and intents must be aligned again.</p><div className="principle-foot"><span>PLAN REVISION</span><code>{String(snapshot.project.revision).padStart(3, "0")}</code></div></aside></section>
-      </>}
-      <footer><span><Command size={13} /> GITANDEM</span><span>Projects <i /> Plans <i /> Work grants</span><button onClick={() => { localStorage.removeItem(PROJECT_KEY); setSnapshot(null); setProjectId(""); }}>Switch project</button></footer>
-    </main>
-    {createOpen && <ProjectDialog busy={busy} onClose={() => setCreateOpen(false)} onSubmit={async (input) => { setBusy(true); setError(""); try { const result = await request("/api/projects", { method: "POST", body: JSON.stringify(input) }) as { snapshot: ProjectSnapshot; repositoryAccess: RepositoryAccess | null }; chooseProject(input.id); setSnapshot(result.snapshot); setRepoAccess(result.repositoryAccess); setCreateOpen(false); } catch (e) { setError(e instanceof Error ? e.message : "Could not create project."); } finally { setBusy(false); } }} />}
-    {workOpen && <WorkDialog busy={busy} onClose={() => setWorkOpen(false)} onSubmit={(input) => { void mutate(`/api/projects/${snapshot.project.id}/work-intents`, { method: "POST", body: JSON.stringify(input) }).then(() => setWorkOpen(false)); }} />}
-    {repoAccess && <RepositoryAccessDialog access={repoAccess} onClose={() => setRepoAccess(null)} />}
-    {workspaceAccess && <WorkspaceAccessDialog access={workspaceAccess} onClose={() => setWorkspaceAccess(null)} />}
-  </div>;
+  if (!projectId || (!snapshot && /not found|Unauthorized/i.test(error))) {
+    return (
+      <>
+        <StartPage
+          login={user?.login}
+          showDevToken={Boolean(token && !user)}
+          onLogout={() => void logout()}
+          onToken={() => { localStorage.removeItem(TOKEN_KEY); setToken(""); }}
+          onCreate={() => setCreateOpen(true)}
+          busy={busy}
+          error={error}
+          onDirectSubmit={async (repoName, goalText) => {
+            setBusy(true);
+            setError("");
+            const idCand = repoName.toLowerCase().trim().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "").slice(0, 63) || `repo-${Date.now().toString(36)}`;
+            try {
+              const res = (await request("/api/projects", {
+                method: "POST",
+                body: JSON.stringify({
+                  id: idCand,
+                  name: repoName,
+                  goal: goalText,
+                  constraints: [],
+                  repositoryMode: "create",
+                }),
+              })) as { snapshot: ProjectSnapshot; repositoryAccess: RepositoryAccess | null };
+              chooseProject(idCand);
+              setSnapshot(res.snapshot);
+              setRepoAccess(res.repositoryAccess);
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not create repository.");
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+        {createOpen && (
+          <ProjectDialog
+            busy={busy}
+            onClose={() => setCreateOpen(false)}
+            onSubmit={async (input) => {
+              setBusy(true);
+              setError("");
+              try {
+                const res = (await request("/api/projects", { method: "POST", body: JSON.stringify(input) })) as {
+                  snapshot: ProjectSnapshot;
+                  repositoryAccess: RepositoryAccess | null;
+                };
+                chooseProject(input.id);
+                setSnapshot(res.snapshot);
+                setRepoAccess(res.repositoryAccess);
+                setCreateOpen(false);
+              } catch (e) {
+                setError(e instanceof Error ? e.message : "Could not create project.");
+              } finally {
+                setBusy(false);
+              }
+            }}
+          />
+        )}
+      </>
+    );
+  }
+
+  if (!snapshot) {
+    return (
+      <div className="loading">
+        <Brand />
+        <div className="loader" />
+        <p>{error || "Opening project cockpit…"}</p>
+        <button type="button" className="button outline small" onClick={() => void refresh()}>Try again</button>
+        <button type="button" className="text-button" onClick={() => { localStorage.removeItem(PROJECT_KEY); setProjectId(""); }}>
+          Switch project
+        </button>
+      </div>
+    );
+  }
+
+  const activeIntents = snapshot.work.filter((i) =>
+    ["needs_resolution", "ready_for_review", "authorized", "in_progress", "submitted", "needs_alignment"].includes(i.status)
+  );
+
+  return (
+    <div style={{ minHeight: "100vh", display: "flex", flexDirection: "column" }}>
+      <ProjectBar
+        snapshot={snapshot}
+        user={user}
+        actorMode={actorMode}
+        onActorModeChange={setActorMode}
+        onConnectAgent={() => void createAgentToken()}
+        onRefresh={() => void refresh()}
+        onLogout={() => void logout()}
+        onSwitchProject={() => { localStorage.removeItem(PROJECT_KEY); setSnapshot(null); setProjectId(""); }}
+        busy={busy}
+        isDev={DEVELOPMENT}
+      />
+
+      <div style={{ display: "flex", flex: 1 }}>
+        <NavigationRail
+          snapshot={snapshot}
+          activeSection={activeSection}
+          onSelectSection={(sec) => {
+            setActiveSection(sec);
+            setDecisionIntent(null);
+            setReviewIntent(null);
+          }}
+          activeTaskCount={activeIntents.length}
+          onShowRepoAccess={() => void showRepositoryAccess()}
+        />
+
+        <main style={{ flex: 1, padding: "24px 32px 48px", overflowY: "auto" }}>
+          {error && (
+            <div
+              style={{
+                display: "flex",
+                alignItems: "center",
+                gap: "8px",
+                padding: "10px 14px",
+                background: "#fff5f5",
+                border: "1px solid var(--status-blocked)",
+                borderRadius: "8px",
+                color: "var(--status-blocked)",
+                fontSize: "12px",
+                marginBottom: "16px",
+              }}
+            >
+              <CircleAlert size={14} />
+              <span style={{ flex: 1 }}>{error}</span>
+              <button type="button" className="button quiet small" onClick={() => setError("")} style={{ padding: "2px" }}>
+                <X size={14} />
+              </button>
+            </div>
+          )}
+
+          {actorMode === "agent" ? (
+            <div style={{ display: "flex", flexDirection: "column", gap: "20px" }}>
+              <div style={{ borderBottom: "1px solid var(--border-subtle)", paddingBottom: "12px" }}>
+                <h2 style={{ fontSize: "18px", fontWeight: 600, color: "var(--text-primary)" }}>
+                  Agent Protocol & Model Context Bus
+                </h2>
+                <p style={{ fontSize: "12px", color: "var(--text-secondary)", marginTop: "4px" }}>
+                  Autonomous agents query the project context, register intent, and run tools via standard MCP JSON-RPC.
+                </p>
+              </div>
+
+              <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: "20px" }}>
+                <div style={{ background: "var(--surface-panel)", border: "1px solid var(--border-muted)", borderRadius: "10px", padding: "18px" }}>
+                  <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--brand)", fontFamily: "var(--font-mono)" }}>
+                    ACTIVE MCP INTERFACE DEFINITIONS
+                  </div>
+                  <pre style={{ marginTop: "10px" }}>
+{`• get_project_context({ projectId })
+• propose_work({ outcome, scope, assumptions, interfaces, evidence })
+• run_workspace_command({ projectId, workId, argv })
+• submit_work_result({ projectId, workId, commit, summary, evidence })`}
+                  </pre>
+                </div>
+
+                <div style={{ background: "var(--surface-panel)", border: "1px solid var(--border-muted)", borderRadius: "10px", padding: "18px" }}>
+                  <div style={{ fontSize: "12px", fontWeight: 600, color: "var(--status-accepted)", fontFamily: "var(--font-mono)" }}>
+                    DURABLE OBJECT STATE SERIALIZATION
+                  </div>
+                  <pre style={{ marginTop: "10px", maxHeight: "240px" }}>
+                    {JSON.stringify(
+                      {
+                        project: snapshot.project,
+                        activeGrants: snapshot.grants.filter((g) => g.status === "active"),
+                        workCount: activeIntents.length,
+                      },
+                      null,
+                      2
+                    )}
+                  </pre>
+                </div>
+              </div>
+            </div>
+          ) : decisionIntent ? (
+            <DecisionLens
+              intent={decisionIntent}
+              snapshot={snapshot}
+              assessment={assessments[decisionIntent.id]}
+              onBack={() => setDecisionIntent(null)}
+              busy={busy}
+              onResolve={async (action, contractDetails) => {
+                if (action === "define_contract" && contractDetails) {
+                  const updatedDecisions = [
+                    ...snapshot.plan.decisions.filter((d) => d.name !== contractDetails.title),
+                    { name: contractDetails.title, value: contractDetails.semantics },
+                  ];
+                  await mutate(`/api/projects/${snapshot.project.id}/plan`, {
+                    method: "PUT",
+                    body: JSON.stringify({
+                      goal: snapshot.plan.goal,
+                      constraints: snapshot.plan.constraints,
+                      decisions: updatedDecisions,
+                      actor: user?.login || "Project owner",
+                    }),
+                  });
+                  setDecisionIntent(null);
+                } else if (action === "adopt_a") {
+                  await authorizeWork(decisionIntent.id);
+                  setDecisionIntent(null);
+                } else {
+                  setDecisionIntent(null);
+                }
+              }}
+            />
+          ) : reviewIntent ? (
+            <CommitReview4D
+              intent={reviewIntent}
+              grant={snapshot.grants.find((g) => g.workId === reviewIntent.id && g.status === "active")}
+              snapshot={snapshot}
+              onBack={() => setReviewIntent(null)}
+              busy={busy}
+              onAccept={async () => {
+                await mutate(`/api/projects/${snapshot.project.id}/work-intents/${reviewIntent.id}/accept`, {
+                  method: "POST",
+                  body: JSON.stringify({ actor: user?.login || "Project owner" }),
+                });
+                setReviewIntent(null);
+              }}
+              onReject={async () => {
+                await mutate(`/api/projects/${snapshot.project.id}/work-intents/${reviewIntent.id}/reject`, {
+                  method: "POST",
+                  body: JSON.stringify({ actor: user?.login || "Project owner" }),
+                });
+                setReviewIntent(null);
+              }}
+            />
+          ) : activeSection === "plan" ? (
+            <PlanView
+              snapshot={snapshot}
+              busy={busy}
+              onSave={(plan) =>
+                void mutate(`/api/projects/${snapshot.project.id}/plan`, {
+                  method: "PUT",
+                  body: JSON.stringify({ ...plan, actor: user?.login || "Project owner" }),
+                })
+              }
+            />
+          ) : (
+            <MissionControl
+              snapshot={snapshot}
+              onSelectIntent={(intent) => {
+                
+                if (intent.status === "submitted" || intent.status === "ready_for_review") {
+                  setReviewIntent(intent);
+                } else {
+                  void assessWork(intent.id);
+                }
+              }}
+              onOpenDecisionLens={(intent) => {
+                setDecisionIntent(intent);
+                void assessWork(intent.id);
+              }}
+              onReviewCandidate={(intent) => setReviewIntent(intent)}
+              onProposeWork={() => setWorkOpen(true)}
+              connectedAgents={connectedAgents}
+            />
+          )}
+        </main>
+      </div>
+
+      <EventTicker activity={snapshot.activity} />
+
+      {/* Global Dialogs */}
+      {createOpen && (
+        <ProjectDialog
+          busy={busy}
+          onClose={() => setCreateOpen(false)}
+          onSubmit={async (input) => {
+            setBusy(true);
+            setError("");
+            try {
+              const res = (await request("/api/projects", { method: "POST", body: JSON.stringify(input) })) as {
+                snapshot: ProjectSnapshot;
+                repositoryAccess: RepositoryAccess | null;
+              };
+              chooseProject(input.id);
+              setSnapshot(res.snapshot);
+              setRepoAccess(res.repositoryAccess);
+              setCreateOpen(false);
+            } catch (e) {
+              setError(e instanceof Error ? e.message : "Could not create project.");
+            } finally {
+              setBusy(false);
+            }
+          }}
+        />
+      )}
+
+      {workOpen && (
+        <WorkDialog
+          busy={busy}
+          onClose={() => setWorkOpen(false)}
+          onSubmit={(input) => {
+            void mutate(`/api/projects/${snapshot.project.id}/work-intents`, {
+              method: "POST",
+              body: JSON.stringify(input),
+            }).then(() => setWorkOpen(false));
+          }}
+        />
+      )}
+
+      {repoAccess && <RepositoryAccessDialog access={repoAccess} onClose={() => setRepoAccess(null)} />}
+      {workspaceAccess && <WorkspaceAccessDialog access={workspaceAccess} onClose={() => setWorkspaceAccess(null)} />}
+      {agentAccess && <AgentAccessDialog access={agentAccess} onClose={() => setAgentAccess(null)} />}
+    </div>
+  );
 }
-
-function Brand() { return <div className="brand"><span className="brand-glyph">g<span>.</span></span><span>gitandem</span></div>; }
-
-function TokenGate({ onSave, error }: { onSave: (value: string) => void; error: string }) {
-  const [value, setValue] = useState("");
-  return <main className="gate"><div className="gate-lines" /><div className="gate-card"><Brand /><div className="kicker">A SHARED PLACE FOR AGENT WORK</div><h1>Plan together.<br /><em>Build with intent.</em></h1><p>Gitandem checks what agents plan to do against a shared project plan before they get permission to work.</p><form onSubmit={(e) => { e.preventDefault(); onSave(value); }}><label htmlFor="token">Local API token</label><div className="field-row"><input id="token" type="password" value={value} onChange={(e) => setValue(e.target.value)} placeholder="Paste your development token" autoComplete="current-password" /><button className="button primary" disabled={!value.trim()}>Connect <ArrowRight size={16} /></button></div></form><div className="gate-note"><LockKeyhole size={14} /><span>This local prototype uses a development token. Your token stays in this browser.</span></div>{error && <div className="form-error">{error}</div>}</div><div className="gate-caption">COORDINATION BEFORE EXECUTION <span>·</span> OPEN SOURCE</div></main>;
-}
-
-function LoginGate({ error }: { error: string }) {
-  return <main className="gate"><div className="gate-lines" /><div className="gate-card login-card"><Brand /><div className="kicker">A SHARED PLACE FOR AGENT WORK</div><h1>Plan together.<br /><em>Build with intent.</em></h1><p>Sign in to create a project space, agree on the plan, and coordinate work across your agents.</p><a className="button primary wide github-login" href="/auth/github/start">Continue with GitHub <ArrowRight size={16} /></a><div className="gate-note"><LockKeyhole size={14} /><span>Gitandem uses GitHub to confirm your identity. You choose when to create a project.</span></div>{error && <div className="form-error">{error}</div>}</div><div className="gate-caption">COORDINATION BEFORE EXECUTION <span>·</span> OPEN SOURCE</div></main>;
-}
-
-function StartPage({ onCreate, onToken, showDevToken, login, onLogout, error }: { onCreate: () => void; onToken: () => void; showDevToken: boolean; login?: string; onLogout: () => void; error: string }) {
-  return <main className="gate"><div className="gate-lines" /><div className="gate-card start-card"><Brand />{!showDevToken && <div className="start-auth"><span>Signed in as <b>{login}</b></span><button className="text-button" onClick={onLogout}>Log out</button></div>}<div className="kicker">YOUR PROJECT SPACE</div><h1>Start with the<br /><em>shared plan.</em></h1><p>Create a local coordination project now. A deployed Gitandem project also creates or imports its canonical Gitandem repository.</p><button className="button primary wide" onClick={onCreate}>Create or import a project <ArrowRight size={16} /></button><div className="start-options"><div><b>Local development</b><span>Run the plan and work-intent flow without remote Cloudflare resources.</span></div><ArrowDownRight size={17} /><div><b>Deployed project</b><span>Create a repo or import a public HTTPS Git remote using Artifacts.</span></div></div>{showDevToken && <button className="text-button" onClick={onToken}>Change local token</button>}{error && <div className="form-error">{error}</div>}</div><div className="gate-caption">A PROJECT HOST FOR AGENTIC WORK</div></main>;
-}
-
-function ProjectDialog({ busy, onClose, onSubmit }: { busy: boolean; onClose: () => void; onSubmit: (input: { id: string; name: string; goal: string; constraints: string[]; repositoryMode: "create" | "import"; sourceUrl?: string; sourceBranch?: string }) => void }) {
-  const [name, setName] = useState(""); const [goal, setGoal] = useState(""); const [sourceUrl, setSourceUrl] = useState(""); const [sourceBranch, setSourceBranch] = useState(""); const [constraints, setConstraints] = useState(""); const [mode, setMode] = useState<"create" | "import">("create");
-  return <Dialog title="Create a project" subtitle="Start with the project goal. A deployed project also gets its canonical Git repository." onClose={onClose}><form className="dialog-form" onSubmit={(e) => { e.preventDefault(); onSubmit({ id: slug(name), name: name.trim(), goal: goal.trim(), constraints: lines(constraints), repositoryMode: mode, sourceUrl: mode === "import" ? sourceUrl.trim() : undefined, sourceBranch: mode === "import" ? sourceBranch.trim() || undefined : undefined }); }}><div className="choice-row"><button type="button" className={mode === "create" ? "choice selected" : "choice"} onClick={() => setMode("create")}><b>New repository</b><span>Available on a deployed Worker</span></button><button type="button" className={mode === "import" ? "choice selected" : "choice"} onClick={() => setMode("import")}><b>Import Git remote</b><span>Public HTTPS remote; deployed Worker</span></button></div><Field label="Project name"><input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="For example, Inventory service" required /></Field><Field label="What are we building?"><textarea value={goal} onChange={(e) => setGoal(e.target.value)} placeholder="Describe the outcome this project should deliver…" required rows={3} /></Field>{mode === "import" && <><Field label="Public HTTPS Git remote"><input value={sourceUrl} onChange={(e) => setSourceUrl(e.target.value)} placeholder="https://github.com/owner/repository.git" required /></Field><Field label="Branch (optional)"><input value={sourceBranch} onChange={(e) => setSourceBranch(e.target.value)} placeholder="Use the source repository default" /></Field></>}<Field label="Starting constraints (one per line)"><textarea value={constraints} onChange={(e) => setConstraints(e.target.value)} placeholder="Keep the public API backwards compatible" rows={2} /></Field><div className="dialog-footnote">Local development creates a plan-only project. Repository setup uses Cloudflare Artifacts on an eligible deployed account.</div><div className="dialog-actions"><button type="button" className="button outline" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy || !slug(name) || !goal.trim() || (mode === "import" && !sourceUrl.trim())}>{busy ? (mode === "import" ? "Importing…" : "Creating…") : (mode === "import" ? "Import project" : "Create project")}<ArrowRight size={15} /></button></div></form></Dialog>;
-}
-
-function RepositoryAccessDialog({ access, onClose }: { access: RepositoryAccess; onClose: () => void }) {
-  const remoteCommand = `git remote add gitandem ${access.remote}\ngit -c http.extraHeader="Authorization: Bearer ${access.token}" fetch gitandem`;
-  return <Dialog title="Read the project repository" subtitle="This short-lived token can fetch the repository. Git writes go through an approved Gitandem work result." onClose={onClose}><div className="repo-info"><span className="label">GIT REMOTE</span><code>{access.remote}</code>{access.importedFrom && <p>Imported from <a href={access.importedFrom} target="_blank" rel="noreferrer">{access.importedFrom}</a></p>}</div><div className="token-panel"><span className="label">TEMPORARY READ TOKEN · EXPIRES IN 15 MINUTES</span><code>{access.token}</code></div><div className="command-panel"><div><span className="label">FETCH FROM A LOCAL FOLDER</span><button className="text-button" onClick={() => void navigator.clipboard.writeText(remoteCommand)}>Copy commands</button></div><pre>{remoteCommand}</pre></div><div className="dialog-footnote">This credential only reads the canonical repository. Agents push to isolated task repositories; accepted results are fast-forwarded through Gitandem.</div><div className="dialog-actions"><button className="button primary" onClick={onClose}>Done <Check size={15} /></button></div></Dialog>;
-}
-
-function WorkspaceAccessDialog({ access, onClose }: { access: WorkspaceAccess; onClose: () => void }) {
-  return <Dialog title="Work is authorized" subtitle="The proposing agent can now use the run_workspace_command tool. Its commands run in an isolated Linux container connected to this task repository." onClose={onClose}><div className="repo-info"><span className="label">ISOLATED TASK REPOSITORY · {access.defaultBranch}</span><code>{access.remote}</code><p>Based on commit {access.baseCommit.slice(0, 12)} · intent {access.workId.slice(0, 8)}</p></div><div className="dialog-footnote">Git credentials stay in Gitandem and are revoked after each command. The agent works in this task's environment through MCP.</div><div className="dialog-actions"><button className="button primary" onClick={onClose}>Done <Check size={15} /></button></div></Dialog>;
-}
-
-function WorkDialog({ busy, onClose, onSubmit }: { busy: boolean; onClose: () => void; onSubmit: (input: Omit<WorkIntent, "id" | "status" | "issues" | "planRevision" | "createdAt">) => void }) {
-  const [agent, setAgent] = useState(""); const [outcome, setOutcome] = useState(""); const [scope, setScope] = useState(""); const [assumptions, setAssumptions] = useState(""); const [interfaces, setInterfaces] = useState(""); const [designChoices, setDesignChoices] = useState(""); const [dependencies, setDependencies] = useState(""); const [acceptance, setAcceptance] = useState("");
-  return <Dialog title="Propose a piece of work" subtitle="Describe the intended change first. Gitandem checks this against the shared plan and other active intents." onClose={onClose}><form className="dialog-form" onSubmit={(e) => { e.preventDefault(); onSubmit({ agent: agent.trim() || "Agent", outcome: outcome.trim(), scope: lines(scope), assumptions: lines(assumptions), interfaces: parsePairs(interfaces).map(({ name, value }) => ({ name, proposal: value })), designChoices: parsePairs(designChoices).map(({ name, value }) => ({ name, proposal: value })), dependencies: lines(dependencies), acceptance: lines(acceptance) }); }}><Field label="Agent or contributor"><input value={agent} onChange={(e) => setAgent(e.target.value)} placeholder="Agent name" /></Field><Field label="Intended outcome"><textarea value={outcome} onChange={(e) => setOutcome(e.target.value)} placeholder="What should be true when this work is done?" required rows={2} /></Field><div className="form-columns"><Field label="Scope (one item per line)"><textarea value={scope} onChange={(e) => setScope(e.target.value)} placeholder="checkout flow" required rows={3} /></Field><Field label="Acceptance evidence (one per line)"><textarea value={acceptance} onChange={(e) => setAcceptance(e.target.value)} placeholder="A declined card shows a retry option" required rows={3} /></Field></div><Field label="Assumptions (one per line)"><textarea value={assumptions} onChange={(e) => setAssumptions(e.target.value)} placeholder="The payment provider remains unchanged" rows={2} /></Field><Field label="Shared interfaces (name: proposal, one per line)"><textarea value={interfaces} onChange={(e) => setInterfaces(e.target.value)} placeholder="Error response: { code, message }" rows={2} /></Field><Field label="Design choices (name: proposal, one per line)"><textarea value={designChoices} onChange={(e) => setDesignChoices(e.target.value)} placeholder="Session storage: versioned files in Artifacts" rows={2} /></Field><Field label="Dependencies (one per line)"><textarea value={dependencies} onChange={(e) => setDependencies(e.target.value)} placeholder="Needs the account API first" rows={2} /></Field><div className="dialog-actions"><button type="button" className="button outline" onClick={onClose}>Cancel</button><button className="button primary" disabled={busy || !outcome.trim() || !lines(scope).length || !lines(acceptance).length}>{busy ? "Submitting…" : "Submit intent"}<ArrowRight size={15} /></button></div></form></Dialog>;
-}
-
-function PlanView({ snapshot, busy, onSave }: { snapshot: ProjectSnapshot; busy: boolean; onSave: (plan: ProjectPlan) => void }) {
-  const [goal, setGoal] = useState(snapshot.plan.goal); const [constraints, setConstraints] = useState(snapshot.plan.constraints.join("\n")); const [decisions, setDecisions] = useState(snapshot.plan.decisions.map((item) => `${item.name}: ${item.value}`).join("\n"));
-  useEffect(() => { setGoal(snapshot.plan.goal); setConstraints(snapshot.plan.constraints.join("\n")); setDecisions(snapshot.plan.decisions.map((item) => `${item.name}: ${item.value}`).join("\n")); }, [snapshot]);
-  return <section className="plan-editor"><div className="plan-editor-head"><div><div className="kicker">THE SHARED AGREEMENT</div><h2>Project plan <span>v{snapshot.project.revision}</span></h2><p>Changing this plan sends active work back for alignment and revokes its current grants.</p></div><div className="revision-stamp">REVISION <b>{String(snapshot.project.revision).padStart(3, "0")}</b></div></div><div className="editor-fields"><Field label="Project goal"><textarea value={goal} onChange={(e) => setGoal(e.target.value)} rows={4} /></Field><Field label="Constraints (one per line)"><textarea value={constraints} onChange={(e) => setConstraints(e.target.value)} rows={5} placeholder="Things all work must preserve" /></Field><Field label="Shared decisions (name: agreed value, one per line)"><textarea value={decisions} onChange={(e) => setDecisions(e.target.value)} rows={5} placeholder="Runtime: Cloudflare Workers" /></Field></div><div className="dialog-actions"><button className="button primary" disabled={busy || !goal.trim()} onClick={() => onSave({ goal, constraints: lines(constraints), decisions: parsePairs(decisions) })}>{busy ? "Saving…" : "Save new plan revision"}<ArrowRight size={15} /></button></div></section>;
-}
-
-function WorkCard({ item, grant, assessment, busy, onAssess, onAction }: { item: WorkIntent; grant?: WorkGrant; assessment?: WorkPlanAssessment; busy: boolean; onAssess: () => void; onAction: (action: "review" | "reject" | "accept") => void }) {
-  const needs = item.status === "needs_resolution" || item.status === "needs_alignment";
-  return <article className={`work-card ${needs ? "work-needs" : ""}`}>
-    <div className="work-card-top"><div className="work-id"><span className={`status-dot ${needs ? "amber" : item.status === "authorized" || item.status === "in_progress" ? "green" : ""}`} /><span>{item.agent}</span><span className="work-separator">/</span><code>INTENT {item.id.slice(0, 7).toUpperCase()}</code></div><Status status={item.status} /></div>
-    <h3>{item.outcome}</h3>
-    {item.issues.length > 0 && <div className="conflict-box"><CircleAlert size={15} /><div><b>{item.status === "needs_alignment" ? "This intent needs a fresh review" : "Resolve before granting access"}</b>{item.issues.map((issue) => <p key={issue.id}>{issue.message}</p>)}</div></div>}
-    <details className="intent-details"><summary>View declared scope and evidence <span>Plan revision {String(item.planRevision).padStart(3, "0")}</span></summary>
-      <div className="work-detail-grid"><div><span className="label">SCOPE</span><div className="chips">{item.scope.map((part) => <code key={part}>{part}</code>)}</div></div><div><span className="label">ACCEPTANCE EVIDENCE</span><ul>{item.acceptance.map((part) => <li key={part}>{part}</li>)}</ul></div></div>
-      {item.assumptions.length > 0 && <div className="assumption-line"><span>ASSUMPTIONS</span>{item.assumptions.join(" · ")}</div>}
-      {item.interfaces.length > 0 && <div className="interfaces">{item.interfaces.map((part) => <div key={part.name}><span>{part.name}</span><code>{part.proposal}</code></div>)}</div>}
-      {item.designChoices.length > 0 && <div className="interfaces"><span className="label">DESIGN CHOICES</span>{item.designChoices.map((part) => <div key={part.name}><span>{part.name}</span><code>{part.proposal}</code></div>)}</div>}
-      {item.dependencies.length > 0 && <div className="assumption-line"><span>DEPENDENCIES</span>{item.dependencies.join(" · ")}</div>}
-    </details>
-    {item.result && <div className="repo-info result-info"><span className="label">SUBMITTED RESULT · {item.result.commit.slice(0, 12)}</span><p>{item.result.summary}</p><div className="chips">{item.result.evidence.map((part) => <code key={part}>{part}</code>)}</div></div>}
-    <div className="assessment-actions"><button className="button quiet" disabled={busy} onClick={onAssess}><Sparkles size={14} /> {assessment ? "Refresh AI assessment" : "Assess plan with AI"}</button><span>Shares the approved plan, this proposal, and up to eight other active proposals with Workers AI.</span>{assessment && <span>Based on plan v{assessment.planRevision}</span>}</div>
-    {assessment && <div className="assessment-panel"><div className="assessment-heading"><div><span className="label">GITANDEM PLAN ASSESSMENT</span><p>Advice from {assessment.model}; it does not change the plan or grant access.</p></div><span className="assessment-tag">NOT A DECISION</span></div><AssessmentLine label="Fit with approved plan" choice={assessment.planFit.choice} probabilities={assessment.planFit.probabilities} />{assessment.comparisons.map((comparison) => <div className="assessment-comparison" key={comparison.work.id}><div className="assessment-peer"><span>Compared with {comparison.work.agent}</span><b>{comparison.work.outcome}</b></div><AssessmentLine label="Can both plans proceed?" choice={comparison.compatibility.choice} probabilities={comparison.compatibility.probabilities} />{comparison.compatibility.choice === "conflict" && <AssessmentLine label="If they conflict, better fit" choice={comparison.priorityIfIncompatible.choice} probabilities={comparison.priorityIfIncompatible.probabilities} />}</div>)}{assessment.omittedActiveProposalCount > 0 && <p className="assessment-note">Compared with {assessment.comparedActiveProposalCount} other active proposals. {assessment.omittedActiveProposalCount} more were not included to stay within the context limit.</p>}<p className="assessment-note">Probabilities are model scores, not proof. Review the proposals and decide what the shared plan should say.</p></div>}
-    {grant?.workspace && <div className="assumption-line"><span>AUTHORIZED WORKSPACE</span><a href={grant.workspace.remote}>{grant.workspace.remote}</a> · {grant.workspace.defaultBranch}</div>}
-    <div className="work-footer"><span>PLAN REVISION {String(item.planRevision).padStart(3, "0")}{item.baseCommit ? ` · BASE ${item.baseCommit.slice(0, 8)}` : " · NO CODE BASE ATTACHED"}</span><div>{item.status !== "authorized" && item.status !== "in_progress" && item.status !== "accepted" && <button className="button quiet" disabled={busy} onClick={() => onAction("reject")}>Reject</button>}{item.status === "ready_for_review" && <button className="button primary small" disabled={busy} onClick={() => onAction("review")}><Check size={14} /> Authorize work</button>}{item.status === "submitted" && <button className="button primary small" disabled={busy} onClick={() => onAction("accept")}><Check size={14} /> Accept into project</button>}</div></div>
-  </article>;
-}
-
-function AssessmentLine({ label, choice, probabilities }: { label: string; choice: string; probabilities: Record<string, number> }) {
-  const top = Object.entries(probabilities).sort((a, b) => b[1] - a[1]).slice(0, 3);
-  return <div className="assessment-line"><span>{label}</span><b>{choice.replaceAll("_", " ")}</b><div className="assessment-scores">{top.map(([option, score]) => <span key={option}>{option.replaceAll("_", " ")} <code>{Math.round(score * 100)}%</code></span>)}</div></div>;
-}
-
-function Status({ status }: { status: WorkIntent["status"] }) { const copy: Record<WorkIntent["status"], string> = { needs_resolution: "Needs decision", ready_for_review: "Ready for review", authorized: "Authorized", in_progress: "In progress", submitted: "Submitted", accepted: "Accepted", rejected: "Rejected", needs_alignment: "Needs alignment" }; return <span className={`status status-${status}`}>{copy[status]}</span>; }
-function Field({ label, children }: { label: string; children: React.ReactNode }) { return <label className="field"><span>{label}</span>{children}</label>; }
-function Dialog({ title, subtitle, onClose, children }: { title: string; subtitle: string; onClose: () => void; children: React.ReactNode }) { return <div className="modal-backdrop" onMouseDown={(e) => { if (e.target === e.currentTarget) onClose(); }}><section className="modal"><div className="modal-head"><div><div className="kicker">GITANDEM · PROJECT CONTROL</div><h2>{title}</h2><p>{subtitle}</p></div><button className="icon-button" onClick={onClose} aria-label="Close"><X size={17} /></button></div>{children}</section></div>; }
 
 createRoot(document.getElementById("root")!).render(<App />);

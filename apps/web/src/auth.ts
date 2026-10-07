@@ -44,7 +44,8 @@ async function sign<T extends { expiresAt: number }>(claims: T, secret: string, 
   const key = await signingKey(secret);
   const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(payload)));
   const maxAge = Math.max(1, Math.floor((claims.expiresAt - now) / 1000));
-  return `${name}=${payload}.${base64UrlEncode(signature)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
+  const secure = import.meta.env?.DEV ? "" : " Secure;";
+  return `${name}=${payload}.${base64UrlEncode(signature)}; Path=/; HttpOnly;${secure} SameSite=Lax; Max-Age=${maxAge}`;
 }
 
 async function verify<T extends { expiresAt: number }>(cookieHeader: string | null, secret: string, name: string, now: number): Promise<T | null> {
@@ -84,7 +85,8 @@ export function parseCookie(cookieHeader: string | null, name: string): string |
 }
 
 export function clearCookie(name: string): string {
-  return `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+  const secure = import.meta.env?.DEV ? "" : " Secure;";
+  return `${name}=; Path=/; HttpOnly;${secure} SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
 }
 
 export function clearSessionCookie(): string { return clearCookie(SESSION_COOKIE); }
