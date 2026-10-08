@@ -17,7 +17,8 @@ worker-configuration.d.ts
 *.log
 *.tsbuildinfo
 
-# Private notes and local agent instructions. Public project docs remain trackable.
+# Local-only notes and scratch directories.
+docs/
 private/
 internal/
 *.private.md
@@ -26,6 +27,3 @@ internal/
 *-internal.md
 AGENTS.md
 MEMORY.md
-
-# Internal planning notes
-

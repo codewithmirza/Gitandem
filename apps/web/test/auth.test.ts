@@ -15,7 +15,7 @@ const now = Date.UTC(2026, 9, 5, 12);
 
 describe("GitHub browser auth primitives", () => {
   it("signs and verifies session claims in a secure HttpOnly cookie", async () => {
-    const claims = { sessionId: "session-123", subject: "github:1234", login: "mirza", expiresAt: now + 60_000 };
+    const claims = { sessionId: "session-123", subject: "github:1234", login: "test-user", expiresAt: now + 60_000 };
     const cookie = await createSessionCookie(claims, secret, now);
     expect(cookie).toContain("__Host-gitandem_session=");
     expect(cookie).toContain("; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=60");
@@ -23,7 +23,7 @@ describe("GitHub browser auth primitives", () => {
   });
 
   it("rejects altered, expired, malformed, and wrongly signed sessions", async () => {
-    const cookie = await createSessionCookie({ sessionId: "session-123", subject: "github:1234", login: "mirza", expiresAt: now + 10_000 }, secret, now);
+    const cookie = await createSessionCookie({ sessionId: "session-123", subject: "github:1234", login: "test-user", expiresAt: now + 10_000 }, secret, now);
     const pair = cookie.split(";")[0]!;
     const [name, value] = pair.split("=");
     const [payload, signature] = value!.split(".");
@@ -62,7 +62,7 @@ describe("GitHub browser auth primitives", () => {
 
   it("never drops Secure from a __Host- prefixed cookie, which browsers would silently reject", async () => {
     const cookies = [
-      await createSessionCookie({ sessionId: "s", subject: "github:1", login: "mirza", expiresAt: now + 60_000 }, secret, now),
+      await createSessionCookie({ sessionId: "s", subject: "github:1", login: "test-user", expiresAt: now + 60_000 }, secret, now),
       (await createOAuthStateCookie(secret, now)).cookie,
       clearSessionCookie(),
       clearOAuthStateCookie(),

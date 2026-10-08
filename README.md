@@ -61,7 +61,7 @@ Requirements: Node.js 20 or newer and pnpm.
 
 ```sh
 pnpm install
-Copy-Item apps/web/.dev.vars.example apps/web/.dev.vars
+cp apps/web/.dev.vars.example apps/web/.dev.vars   # PowerShell: Copy-Item
 # Edit apps/web/.dev.vars and set a long random local token.
 pnpm dev
 ```
@@ -84,27 +84,21 @@ pnpm cf-typegen
 
 Owner REST routes use `Authorization: Bearer <GITANDEM_API_TOKEN>`. The deployment-wide `GITANDEM_AGENT_TOKEN` is a bootstrap credential for project creation; agents use project-specific MCP credentials for project work. An agent can submit a result via MCP; only the owner REST interface can accept it into the canonical branch.
 
-REST routes are documented in [docs/api.md](docs/api.md). The MCP server exposes tools to create a project, read its context, propose work, run commands after owner authorization, and submit a finished commit. MCP is an interface an agent can use to work with Gitandem; it does not require a separate agent-to-agent protocol.
+REST and MCP routes are implemented in `apps/web/src/worker.ts`. The MCP server exposes tools to create a project, read its context, propose work, run commands after owner authorization, and submit a finished commit. MCP is an interface an agent can use to work with Gitandem; it does not require a separate agent-to-agent protocol.
 
 Use separate `GITANDEM_API_TOKEN` and `GITANDEM_AGENT_TOKEN` values. The owner token guards REST. The bootstrap token only creates projects; each project agent receives a revocable credential scoped to that project's MCP endpoint. Project credentials are stored as hashes, and proposal identity comes from the credential rather than a caller-supplied label. The owner and bootstrap tokens remain deployment-wide prototype secrets, not a user or membership system. The runner currently has Internet access and limits each command to 120 seconds. An isolated staging run verified the complete proposal, authorization, execution, submission, acceptance, and canonical-head flow; stale-base and partial-failure cases still need live checks.
 
 ## Architecture
 
-See [docs/architecture.md](docs/architecture.md) for the current data flow and the boundaries between project coordination, Git history, and code execution.
+The web application lives in `apps/web`. The shared coordination contract lives in `packages/core`, which is the source of truth for plans, work intents, conflicts, and grants; the web app is a client of that contract rather than the core product.
 
-See [docs/target-architecture.md](docs/target-architecture.md) for the larger design Gitandem is moving toward, including user identity, provider imports, and the boundary around independent agents.
-
-See the implementation order. The project interface is a client of the coordination protocol; it is not the core product.
-
-The existing web application lives in `apps/web`. Future protocol packages and SDKs will live in `packages/`, so all parts of Gitandem stay in one monorepo.
-
-The v2 coordination contract is documented in [docs/protocol.md](docs/protocol.md). JSON API responses include `X-Gitandem-Contract-Version`; project snapshots include the same version as `contractVersion`.
+JSON API responses include `X-Gitandem-Contract-Version`; project snapshots include the same value as `contractVersion`.
 
 Cloudflare Workers serves the app and APIs. Each project maps to a SQLite-backed Durable Object, which is the single coordination authority for that project. Cloudflare documents Durable Objects as strongly consistent, serializable storage attached to globally named coordinators: [Durable Objects](https://developers.cloudflare.com/durable-objects/), [SQLite-backed storage](https://developers.cloudflare.com/durable-objects/api/sqlite-storage-api/).
 
 ## Contributing
 
-This is an early open-source project. See [CONTRIBUTING.md](CONTRIBUTING.md) for the current development rules and planned boundaries. Please describe the user problem and intended behavior before making a large change.
+This is an early open-source project. Please describe the user problem and intended behavior before making a large change, since coordination rules affect authority and agent access.
 
 ## License
 

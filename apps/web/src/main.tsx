@@ -48,19 +48,15 @@ function App() {
   // Navigation & view state
   const [actorMode, setActorMode] = useState<"human" | "agent">("human");
   const [activeSection, setActiveSection] = useState<NavSection>("cockpit");
-    const [decisionIntent, setDecisionIntent] = useState<WorkIntent | null>(null);
+  const [decisionIntent, setDecisionIntent] = useState<WorkIntent | null>(null);
   const [reviewIntent, setReviewIntent] = useState<WorkIntent | null>(null);
 
   // Dialogs
   const [createOpen, setCreateOpen] = useState(false);
   const [workOpen, setWorkOpen] = useState(false);
 
-  // Active mock connections
-  const connectedAgents = [
-    { name: "Claude Code (Sonnet 3.5)", lastSeen: "2s ago" },
-    { name: "Cursor Composer", lastSeen: "8s ago" },
-    { name: "Codex CLI", lastSeen: "14s ago" },
-  ];
+  // Live agent heartbeats are not collected yet, so no connection is reported.
+  const connectedAgents: Array<{ name: string; lastSeen: string }> = [];
 
   useEffect(() => {
     let cancelled = false;

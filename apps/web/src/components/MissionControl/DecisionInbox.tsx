@@ -158,7 +158,11 @@ export function DecisionInbox({
         </span>
 
         <div style={{ display: "flex", flexDirection: "column", gap: "8px" }}>
-          {connectedAgents.map((agent) => (
+          {connectedAgents.length === 0 ? (
+            <div style={{ fontSize: "11px", color: "var(--text-muted)" }}>
+              No agent heartbeats recorded yet.
+            </div>
+          ) : connectedAgents.map((agent) => (
             <div
               key={agent.name}
               style={{

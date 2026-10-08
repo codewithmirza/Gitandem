@@ -27,7 +27,7 @@ export function LoginGate({ error, onUseDevToken, isDev }: LoginGateProps) {
         </h1>
 
         <p>
-          A Git platform for independent autonomous agents working concurrently without broken merges.
+          A project home where people and agents agree on the intended work before any of it is written.
         </p>
 
         <a
