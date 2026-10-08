@@ -265,8 +265,7 @@ async function authRoute(request: Request, env: Env): Promise<Response | null> {
   if (url.pathname === "/auth/github/start" && request.method === "GET") {
     if (!githubAuthConfigured(env)) return json({ error: "GitHub sign-in is not configured for this deployment." }, 503);
     const clientId = env.GITANDEM_GITHUB_CLIENT_ID || env.GITHUB_CLIENT_ID;
-    const isSecure = url.protocol === "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1";
-    const attempt = await createOAuthStateCookie(env.GITANDEM_SESSION_SECRET!, isSecure);
+    const attempt = await createOAuthStateCookie(env.GITANDEM_SESSION_SECRET!);
     const callback = new URL("/auth/github/callback", publicUrl(env)!);
     const authorize = new URL("https://github.com/login/oauth/authorize");
     authorize.searchParams.set("client_id", clientId!);
@@ -277,8 +276,7 @@ async function authRoute(request: Request, env: Env): Promise<Response | null> {
     return new Response(null, { status: 302, headers: { Location: authorize.toString(), "Set-Cookie": attempt.cookie, "Cache-Control": "no-store" } });
   }
   if (url.pathname === "/auth/github/callback" && request.method === "GET") {
-    const isSecure = url.protocol === "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1";
-    const clearState = clearOAuthStateCookie(isSecure);
+    const clearState = clearOAuthStateCookie();
     if (!githubAuthConfigured(env)) return json({ error: "GitHub sign-in is not configured for this deployment." }, 503, { "Set-Cookie": clearState });
     const clientId = env.GITANDEM_GITHUB_CLIENT_ID || env.GITHUB_CLIENT_ID;
     const clientSecret = env.GITANDEM_GITHUB_CLIENT_SECRET || env.GITHUB_CLIENT_SECRET;
@@ -305,19 +303,17 @@ async function authRoute(request: Request, env: Env): Promise<Response | null> {
     const expiresAt = Date.now() + 7 * 24 * 60 * 60 * 1000;
     const claims: SessionClaims = { sessionId: crypto.randomUUID() + crypto.randomUUID(), subject: `github:${githubId}`, login: profile.login.trim(), expiresAt };
     await userDirectory(env, claims.subject).createSession(claims.sessionId, expiresAt);
-    const sessionCookie = await createSessionCookie(claims, env.GITANDEM_SESSION_SECRET!, isSecure);
+    const sessionCookie = await createSessionCookie(claims, env.GITANDEM_SESSION_SECRET!);
     const headers = new Headers({ Location: "/", "Cache-Control": "no-store" });
-    const secureFlag = isSecure ? " Secure;" : "";
-    headers.append("Set-Cookie", `${sessionCookie.split(";")[0]}; Path=/; HttpOnly;${secureFlag} SameSite=Lax; Max-Age=604800`);
+    headers.append("Set-Cookie", sessionCookie);
     headers.append("Set-Cookie", clearState);
     return new Response(null, { status: 302, headers });
   }
   if (url.pathname === "/auth/logout" && request.method === "POST") {
     if (!isSameOrigin(request)) return json({ error: "Sign-out request must come from this site." }, 403);
-    const isSecure = url.protocol === "https:" && url.hostname !== "localhost" && url.hostname !== "127.0.0.1";
     const user = await currentUser(request, env);
     if (user) await userDirectory(env, user.subject).revokeSession(user.sessionId);
-    return new Response(JSON.stringify({ signedOut: true }), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "Set-Cookie": clearSessionCookie(isSecure) } });
+    return new Response(JSON.stringify({ signedOut: true }), { status: 200, headers: { "Content-Type": "application/json", "Cache-Control": "no-store", "Set-Cookie": clearSessionCookie() } });
   }
   return null;
 }

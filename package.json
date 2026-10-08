@@ -6,7 +6,7 @@
   "scripts": {
     "dev": "pnpm --filter @gitandem/web dev",
     "build": "pnpm --filter @gitandem/web build",
-    "test": "pnpm --filter @gitandem/core test",
+    "test": "pnpm -r test",
     "preview": "pnpm --filter @gitandem/web preview",
     "cf-typegen": "pnpm --filter @gitandem/web cf-typegen"
   }

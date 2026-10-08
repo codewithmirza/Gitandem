@@ -38,14 +38,14 @@ async function signingKey(secret: string): Promise<CryptoKey> {
   return crypto.subtle.importKey("raw", encoder.encode(secret), { name: "HMAC", hash: "SHA-256" }, false, ["sign", "verify"]);
 }
 
-async function sign<T extends { expiresAt: number }>(claims: T, secret: string, name: string, isSecure = true, now = Date.now()): Promise<string> {
+/** `Secure` is always emitted: the `__Host-` prefix requires it and browsers drop the cookie otherwise. Browsers accept `Secure` cookies on `http://localhost`, so local dev keeps working. */
+async function sign<T extends { expiresAt: number }>(claims: T, secret: string, name: string, now = Date.now()): Promise<string> {
   if (!Number.isSafeInteger(claims.expiresAt) || claims.expiresAt <= now) throw new Error("Cookie expiry must be in the future.");
   const payload = base64UrlEncode(encoder.encode(JSON.stringify(claims)));
   const key = await signingKey(secret);
   const signature = new Uint8Array(await crypto.subtle.sign("HMAC", key, encoder.encode(payload)));
   const maxAge = Math.max(1, Math.floor((claims.expiresAt - now) / 1000));
-  const secure = isSecure ? " Secure;" : "";
-  return `${name}=${payload}.${base64UrlEncode(signature)}; Path=/; HttpOnly;${secure} SameSite=Lax; Max-Age=${maxAge}`;
+  return `${name}=${payload}.${base64UrlEncode(signature)}; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=${maxAge}`;
 }
 
 async function verify<T extends { expiresAt: number }>(cookieHeader: string | null, secret: string, name: string, now: number): Promise<T | null> {
@@ -84,17 +84,16 @@ export function parseCookie(cookieHeader: string | null, name: string): string |
   try { return decodeURIComponent(found); } catch { return null; }
 }
 
-export function clearCookie(name: string, isSecure = true): string {
-  const secure = isSecure ? " Secure;" : "";
-  return `${name}=; Path=/; HttpOnly;${secure} SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
+export function clearCookie(name: string): string {
+  return `${name}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0; Expires=Thu, 01 Jan 1970 00:00:00 GMT`;
 }
 
-export function clearSessionCookie(isSecure = true): string { return clearCookie(SESSION_COOKIE, isSecure); }
-export function clearOAuthStateCookie(isSecure = true): string { return clearCookie(OAUTH_COOKIE, isSecure); }
+export function clearSessionCookie(): string { return clearCookie(SESSION_COOKIE); }
+export function clearOAuthStateCookie(): string { return clearCookie(OAUTH_COOKIE); }
 
-export function createSessionCookie(claims: SessionClaims, secret: string, isSecure = true, now = Date.now()): Promise<string> {
+export function createSessionCookie(claims: SessionClaims, secret: string, now = Date.now()): Promise<string> {
   if (!claims.sessionId || claims.sessionId.length > 100 || !claims.subject || claims.subject.length > 256 || !claims.login || claims.login.length > 100) throw new Error("Invalid session claims.");
-  return sign(claims, secret, SESSION_COOKIE, isSecure, now);
+  return sign(claims, secret, SESSION_COOKIE, now);
 }
 
 export async function readSessionCookie(cookieHeader: string | null, secret: string, now = Date.now()): Promise<SessionClaims | null> {
@@ -105,7 +104,7 @@ export async function readSessionCookie(cookieHeader: string | null, secret: str
 }
 
 /** Creates a short-lived state + PKCE cookie. The callback must validate the returned state and clear this cookie. */
-export async function createOAuthStateCookie(secret: string, isSecure = true, now = Date.now()): Promise<{
+export async function createOAuthStateCookie(secret: string, now = Date.now()): Promise<{
   state: string;
   verifier: string;
   challenge: string;
@@ -116,7 +115,7 @@ export async function createOAuthStateCookie(secret: string, isSecure = true, no
   const verifier = base64UrlEncode(crypto.getRandomValues(new Uint8Array(32)));
   const challenge = base64UrlEncode(new Uint8Array(await crypto.subtle.digest("SHA-256", encoder.encode(verifier))));
   const expiresAt = now + OAUTH_TTL_MS;
-  const cookie = await sign({ state, verifier, expiresAt }, secret, OAUTH_COOKIE, isSecure, now);
+  const cookie = await sign({ state, verifier, expiresAt }, secret, OAUTH_COOKIE, now);
   return { state, verifier, challenge, cookie, expiresAt };
 }
 

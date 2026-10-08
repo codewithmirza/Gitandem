@@ -48,6 +48,8 @@ describe("GitHub browser auth primitives", () => {
     const expectedChallenge = btoa(String.fromCharCode(...digest)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/g, "");
     expect(attempt.challenge).toBe(expectedChallenge);
     const pair = attempt.cookie.split(";")[0]!;
+    expect(attempt.cookie).toContain("__Host-gitandem_oauth=");
+    expect(attempt.cookie).toContain("; Path=/; HttpOnly; Secure; SameSite=Lax;");
     expect(await readOAuthStateCookie(pair, attempt.state, secret, now)).toEqual({ verifier: attempt.verifier });
     expect(await readOAuthStateCookie(pair, "wrong-state", secret, now)).toBeNull();
     expect(await readOAuthStateCookie(pair, attempt.state, secret, attempt.expiresAt)).toBeNull();
@@ -56,6 +58,20 @@ describe("GitHub browser auth primitives", () => {
   it("provides cookie clearing headers for session and OAuth state", () => {
     expect(clearSessionCookie()).toMatch(/^__Host-gitandem_session=; .*HttpOnly; Secure; SameSite=Lax; Max-Age=0;/);
     expect(clearOAuthStateCookie()).toMatch(/^__Host-gitandem_oauth=; .*Max-Age=0;/);
+  });
+
+  it("never drops Secure from a __Host- prefixed cookie, which browsers would silently reject", async () => {
+    const cookies = [
+      await createSessionCookie({ sessionId: "s", subject: "github:1", login: "mirza", expiresAt: now + 60_000 }, secret, now),
+      (await createOAuthStateCookie(secret, now)).cookie,
+      clearSessionCookie(),
+      clearOAuthStateCookie(),
+    ];
+    for (const cookie of cookies) {
+      expect(cookie.split(";")[0]).toMatch(/^__Host-/);
+      expect(cookie).toMatch(/; Secure;/);
+      expect(cookie).not.toMatch(/Domain=/);
+    }
   });
 
   it("requires a valid same-origin Origin header", () => {
